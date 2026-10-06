@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Read-only: is the binary under test current, and is the user's own devsrv state untouched?
+set -euo pipefail
+
+repo="$(cd "$(dirname "$0")/../../../.." && pwd)"
+bin="${DEVSRV_BIN:-$repo/target/debug/devsrv}"
+status=0
+if [ ! -x "$bin" ]; then
+	echo "FAIL: no binary at $bin (run cargo build)"
+	exit 1
+fi
+want="devsrv $(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)"
+have="$("$bin" -V)"
+if [ "$have" != "$want" ]; then
+	echo "FAIL: $bin is $have, Cargo.toml says $want"
+	status=1
+fi
+if [ -n "$(find "$repo/src" -newer "$bin" -type f | head -1)" ]; then
+	echo "FAIL: sources newer than the binary (run cargo build)"
+	status=1
+fi
+for s in "$repo"/target/verify-devsrv/*/; do
+	[ -d "$s/state" ] || continue
+	alive=$(cd "$s/proj" && DEVSRV_STATE_DIR="$s/state" "$bin" --json ls | { grep -o '"alive":true' || true; } | wc -l | tr -d ' ')
+	if [ "$alive" != "0" ]; then
+		echo "NOTE: session $(basename "$s") still has $alive running (cleanup.sh $(basename "$s"))"
+	fi
+done
+echo "PATH devsrv: $(command -v devsrv || echo none)"
+[ "$status" = 0 ] && echo OK
+exit "$status"

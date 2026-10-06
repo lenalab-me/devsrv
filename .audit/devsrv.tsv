@@ -16,3 +16,4 @@ ts	phase	decision	why	evidence	result
 2026-10-06T18:05:39Z	test	完了の条件 1〜12 を本物のプロセスの結合テストにした（ほかに 7 件、計 19 件）	条件を確かめる関門を、手の確かめでなくスクリプトにする	tests/cli.rs	19 passed、3 回続けて通る、残るプロセスなし
 2026-10-06T18:05:39Z	test	わざと壊して検知を確かめた: 照合を外すと c05、TERM を送らないと c04 が落ちる	1 回目で全部通ったので観測の方法を疑った	この thread の壊したテストの出力	検知する
 2026-10-06T18:05:39Z	test	テストを 2 点強くした: 他人役を自分のグループの先頭にする（でないと照合の穴を見逃す）、失敗しても他人役を Drop で止める	1 回目の壊し方で、失敗したテストが sleep を残してパイプを握り rg が止まった	tests/cli.rs Stranger, c04 の分割	直した
+2026-10-06T18:09:29Z	verify	検証のスキル verify-devsrv を作り、自分の手順で一度通した（doctor、start-http、curl 200、stop、cleanup）	rpatch の教訓どおり、実際に動かして証拠を残す仕組みを用意する	.agents/skills/verify-devsrv/, target/verify-devsrv/start-http-1791310094/	通った。途中で cleanup の grep と pipefail の不具合を見つけて直した
