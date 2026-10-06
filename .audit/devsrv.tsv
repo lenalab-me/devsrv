@@ -1,0 +1,4 @@
+ts	phase	decision	why	evidence	result
+2026-10-06T17:06:37Z	frame	完了の条件を 12 個、本物のプロセスで確かめる形で書いた	止めてはいけないものを止めるのは取り返しがつかないので、結合テストを関門にする	docs/plan.md	open
+2026-10-06T17:06:37Z	frame	基準を取り直した: sleep 702、待ちループ 189、lsof 99、pkill 65、kill 76	入れたあとに --since で比べるため	~/project/prod/devsrv-notes/baseline-2026-10-07.txt	Bash 7915 回
+2026-10-06T17:06:37Z	frame	厳しさは高め。architect の arena と interrogate を両方かける	プロセスを止める操作は一方通行で、PID の使い回しなど落とし穴が多い	docs/plan.md	open
