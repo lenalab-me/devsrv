@@ -27,3 +27,6 @@ ts	phase	decision	why	evidence	result
 2026-10-06T23:56:13Z	impl	足した『残りを名指し』が、PID が使い回されたときに他人を前の実行の残りとして名指しした（c05 が捕まえた）。PID が今も別のプロセスなら名指ししない	POSIX ではグループが残る間その番号を PID に使い回さないので、使い回された時点で元のグループは空	src/commands.rs stop_orphan, start	直した
 2026-10-06T23:56:13Z	impl	同時の start で終了 3 が出る競合を見つけた: プロジェクトの目印ファイルの書きかけを別の呼び出しが読んでいた。一時ファイルと rename にした	同時の start のテストで再現した	src/store.rs project	直した
 2026-10-06T23:56:13Z	test	テストを 4 件足し（同時の start、start を殺す、先頭だけ死んだ orphan、::1 だけのサーバー）、全テストを 10 回続けて回した	レビュー A は 11 回中 4 回落ちると報告していた	tests/cli.rs	10 回とも 43 件すべて通る
+2026-10-06T23:57:48Z	finish	cargo install で入れ、Claude Code の Bash ツールの別々の呼び出しで、起動 → curl 200 → ls・who・wait → stop → グループ 0 件を確かめた	完了の条件を、テストの外の本物の環境でも確かめる	この thread の 2 回の呼び出しの出力	通った
+2026-10-06T23:57:48Z	finish	CLAUDE.md・AGENTS.md・Cursor のルールに案内を 1 行足した（2026-10-06T23:57Z）	HANDOFF の段 5。rpatch は 2 行の案内だけで使われるようになった	~/.claude/CLAUDE.md の CLI tools	入れた。効果は数日後に baseline.py --since で測る
+2026-10-06T23:57:48Z	finish	GitHub のリポジトリ作成と push、Linux の CI は、ユーザーに確かめるまで保留	外に出す操作で、HANDOFF にも『作るときに確かめる』とある	HANDOFF.md 次にやること	open
