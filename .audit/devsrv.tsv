@@ -30,3 +30,4 @@ ts	phase	decision	why	evidence	result
 2026-10-06T23:57:48Z	finish	cargo install で入れ、Claude Code の Bash ツールの別々の呼び出しで、起動 → curl 200 → ls・who・wait → stop → グループ 0 件を確かめた	完了の条件を、テストの外の本物の環境でも確かめる	この thread の 2 回の呼び出しの出力	通った
 2026-10-06T23:57:48Z	finish	CLAUDE.md・AGENTS.md・Cursor のルールに案内を 1 行足した（2026-10-06T23:57Z）	HANDOFF の段 5。rpatch は 2 行の案内だけで使われるようになった	~/.claude/CLAUDE.md の CLI tools	入れた。効果は数日後に baseline.py --since で測る
 2026-10-06T23:57:48Z	finish	GitHub のリポジトリ作成と push、Linux の CI は、ユーザーに確かめるまで保留	外に出す操作で、HANDOFF にも『作るときに確かめる』とある	HANDOFF.md 次にやること	open
+2026-10-06T23:57:58Z	design	（あとから足した行）arena の採点役 GPT-6.1-Sol は、案 B を書いたのと同じモデルだった。採点が B に寄った可能性がある	p3-models.md の cross-judge pool の 3 つはどれもランナーと同じで、避けられなかった。だから採点をそのまま採らず、理由を 1 つずつ読んで決めた	docs/design.md「まとめの判断」	記録のみ
