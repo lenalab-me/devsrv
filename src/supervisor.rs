@@ -136,18 +136,16 @@ fn address(spec: &Spec, child: i32, met_host: Option<&str>) -> String {
     }
 }
 
-/// Listeners on the port that are not in the group. Empty when the group owns it, or
-/// when the owners cannot be seen (then nothing is claimed either way).
+/// Listeners on the port that are visibly not in the group. The port was free when it
+/// was chosen, so any such listener may be the one that answered (IPv4 and IPv6 can
+/// have different owners). Owners that cannot be seen are not counted either way.
 fn foreign_listeners(port: u16, pgid: i32) -> Vec<i32> {
     let Ok(pids) = os::tcp_listeners(port) else {
         return vec![];
     };
-    let ours = |pid: &i32| matches!(os::proc_info(*pid), Lookup::Found(p) if p.pgid == pgid);
-    if pids.is_empty() || pids.iter().any(ours) {
-        vec![]
-    } else {
-        pids
-    }
+    pids.into_iter()
+        .filter(|&pid| matches!(os::proc_info(pid), Lookup::Found(p) if p.pgid != pgid))
+        .collect()
 }
 
 fn supervise(claim: &Claim, spec: &Spec) -> Result<(), String> {
@@ -206,6 +204,7 @@ fn supervise(claim: &Claim, spec: &Spec) -> Result<(), String> {
             status,
             cause,
             survivors: t.survivors,
+            unconfirmed: t.unconfirmed,
         };
         claim
             .write(&record(
@@ -232,6 +231,13 @@ fn supervise(claim: &Claim, spec: &Spec) -> Result<(), String> {
     };
     match probe::wait_for(&readiness(spec, log.clone()), spec.timeout(), interrupted) {
         Outcome::Met(met, waited) => {
+            // The condition can hold on what the command left behind (a log line, a
+            // grandchild's port) after the command itself has exited.
+            match interrupted() {
+                Some(Interrupt::Exited) => return finish(child, Cause::OnItsOwn),
+                Some(Interrupt::Stop) => return finish(child, Cause::Stopped { forced: false }),
+                None => {}
+            }
             if let Some(port) = spec
                 .port
                 .filter(|_| matches!(spec.ready, Ready::Http { .. } | Ready::Port))

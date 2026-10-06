@@ -620,3 +620,186 @@ fn an_unwritable_state_directory_fails_before_running_anything() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("export DEVSRV_STATE_DIR="));
     assert!(!marker.exists());
 }
+
+fn signal(sig: &str, pid: i64) {
+    Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .status()
+        .unwrap();
+}
+
+fn record_of(env: &Env, name: &str) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(env.record_path(name)).unwrap()).unwrap()
+}
+
+fn devsrv_child(env: &Env, args: &[&str]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_devsrv"))
+        .args(args)
+        .current_dir(env.projects[0].path())
+        .env("DEVSRV_STATE_DIR", env.state.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn a_start_does_not_report_a_later_run_as_its_own() {
+    let env = Env::new();
+    let first = devsrv_child(
+        &env,
+        &[
+            "start",
+            "x",
+            "--ready",
+            "log:never",
+            "--",
+            "sh",
+            "-c",
+            "sleep 0.5; exit 3",
+        ],
+    );
+    assert!(eventually(Duration::from_secs(5), || env
+        .state
+        .path()
+        .read_dir()
+        .unwrap()
+        .next()
+        .is_some()
+        && env.record_path("x").exists()));
+    signal("-STOP", first.id() as i64);
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("x")["state"] == "dead"
+    ));
+    assert_eq!(env.run(&["start", "x", "--", "sleep", "300"]).code, 0);
+    signal("-CONT", first.id() as i64);
+    let out = first.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "{stderr}");
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+}
+
+#[test]
+fn a_stop_finishes_the_job_when_the_supervisor_dies_midway() {
+    let env = Env::new();
+    assert_eq!(env.run(&["start", "x", "--", "sleep", "300"]).code, 0);
+    let rec = record_of(&env, "x");
+    let sup = rec["state"]["up"]["supervisor"]["pid"].as_i64().unwrap();
+    let pgid = rec["state"]["up"]["child"]["pid"].as_i64().unwrap();
+    signal("-STOP", sup);
+    let stop = devsrv_child(&env, &["stop", "x"]);
+    let stop_file = env.record_path("x").with_file_name("stop");
+    assert!(eventually(Duration::from_secs(5), || stop_file.exists()));
+    signal("-KILL", sup);
+    let out = stop.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("its supervisor was gone"));
+    assert!(
+        !group_alive(pgid),
+        "the command was stopped, not just reported"
+    );
+}
+
+#[test]
+fn a_log_line_left_by_a_command_that_exited_is_not_ready() {
+    let env = Env::new();
+    // The line and the exit both land between two probes (50 ms apart), and the
+    // grandchild ignores TERM, so a wrong "ready" would stay visible for the 5 s grace.
+    let script = "trap '' TERM; sleep 300 & sleep 0.2; echo READY; exit 3";
+    let r = env.run(&[
+        "start",
+        "x",
+        "--ready",
+        "log:READY",
+        "--",
+        "sh",
+        "-c",
+        script,
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("x exited with code 3"), "{}", r.stderr);
+}
+
+#[test]
+fn an_http_reply_that_trickles_does_not_stretch_the_timeout() {
+    let env = Env::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in listener.incoming() {
+            let Ok(mut s) = s else { return };
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    if s.write_all(b"x").is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            });
+        }
+    });
+    let t = Instant::now();
+    let r = env.run(&[
+        "wait",
+        &format!("http://127.0.0.1:{port}/"),
+        "--timeout",
+        "300ms",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn stop_all_reports_a_broken_record_instead_of_skipping_it() {
+    let env = Env::new();
+    assert_eq!(env.run(&["start", "x", "--", "sleep", "300"]).code, 0);
+    let path = env.record_path("x");
+    let good = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, "{ not json").unwrap();
+    let r = env.run(&["stop", "--all"]);
+    assert_eq!(r.code, 3, "{}", r.stdout);
+    assert!(r.stderr.contains("broken"), "{}", r.stderr);
+    std::fs::write(&path, good).unwrap();
+}
+
+#[test]
+fn an_orphan_that_still_runs_is_shown_as_alive_and_as_devsrvs() {
+    let env = Env::new();
+    let url = start_server(&env, "web");
+    let port = url
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .to_string();
+    let sup = record_of(&env, "web")["state"]["up"]["supervisor"]["pid"]
+        .as_i64()
+        .unwrap();
+    signal("-KILL", sup);
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("web")["state"] == "orphan"
+    ));
+    assert_eq!(env.process("web")["alive"], true);
+    assert!(env.run(&["ls"]).stdout.starts_with("1 running, 0 dead"));
+    let who = env.run(&["who", &port]);
+    assert!(
+        who.stdout.contains("web (devsrv, this project)") && who.stdout.contains("devsrv stop web"),
+        "{}",
+        who.stdout
+    );
+    let r = env.run(&["stop", "web"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(http_get(url.trim()), None, "stopped");
+}

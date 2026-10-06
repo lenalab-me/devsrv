@@ -129,11 +129,10 @@ fn http_status(
     deadline: Instant,
 ) -> Result<u16, String> {
     let mut s = connect(addr, deadline)?;
-    let left = deadline
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_millis(50));
-    let _ = s.set_read_timeout(Some(left.min(Duration::from_secs(2))));
-    let _ = s.set_write_timeout(Some(left.min(Duration::from_secs(2))));
+    // One probe gets at most 2 s, and never runs past the caller's deadline.
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(2));
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let _ = s.set_write_timeout(Some(left().max(Duration::from_millis(1))));
     let req = format!(
         "GET {path} HTTP/1.0\r\nHost: {host}:{}\r\nUser-Agent: devsrv\r\nConnection: close\r\n\r\n",
         addr.port()
@@ -144,6 +143,10 @@ fn http_status(
     let mut chunk = [0u8; 1024];
     // Skip interim 1xx responses: the first final status line counts.
     loop {
+        if left().is_zero() {
+            return Err("connected, but no complete HTTP status line in time".into());
+        }
+        let _ = s.set_read_timeout(Some(left()));
         let n = s
             .read(&mut chunk)
             .map_err(|_| "connected, but no HTTP response".to_string())?;

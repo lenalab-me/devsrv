@@ -17,3 +17,8 @@ ts	phase	decision	why	evidence	result
 2026-10-06T18:05:39Z	test	わざと壊して検知を確かめた: 照合を外すと c05、TERM を送らないと c04 が落ちる	1 回目で全部通ったので観測の方法を疑った	この thread の壊したテストの出力	検知する
 2026-10-06T18:05:39Z	test	テストを 2 点強くした: 他人役を自分のグループの先頭にする（でないと照合の穴を見逃す）、失敗しても他人役を Drop で止める	1 回目の壊し方で、失敗したテストが sleep を残してパイプを握り rg が止まった	tests/cli.rs Stranger, c04 の分割	直した
 2026-10-06T18:09:29Z	verify	検証のスキル verify-devsrv を作り、自分の手順で一度通した（doctor、start-http、curl 200、stop、cleanup）	rpatch の教訓どおり、実際に動かして証拠を残す仕組みを用意する	.agents/skills/verify-devsrv/, target/verify-devsrv/start-http-1791310094/	通った。途中で cleanup の grep と pipefail の不具合を見つけて直した
+2026-10-06T23:42:21Z	review	interrogate を 3 モデルで始めた。Fable 5.1 は Claude API の上限で失敗し、Cursor 経由の同じモデルで、コミットを固定した worktree に向けて立て直した	同じ系統のモデルで代える（interrogate の手順）。worktree にしたのは、直しを本体で並行して進めても混ざらないように	/tmp/interrogate-devsrv/brief.md, /tmp/interrogate-devsrv/snapshot	B と C は完了、A は待ち
+2026-10-06T23:42:21Z	review	B と C が独立に挙げた 4 件を『対応する』にした: stop の途中で見張り役が死ぬと成功と言う、orphan の照合が最初の 1 回だけ、生きている orphan を dead や他人と言う、読めない一覧を空と扱う	2 モデルが独立に見つけたものは最も確か。B3 と C1 は実際に再現していた	B と C のレビュー	直した
+2026-10-06T23:42:21Z	review	片方だけの指摘のうち再現つきのもの（B2 別の実行の結果、B4 終わった子のログで ready、B5 IPv4/IPv6、B6 HTTP の期限、B7 stop --all、C2 記録前の stop、C3 早すぎる KILL、C7 見えない持ち主）も直した	再現があるか、コードを読めば明らかな誤り	src/commands.rs stop_one, src/os/mod.rs, src/supervisor.rs, src/probe.rs	直した
+2026-10-06T23:42:21Z	review	C8 のうち、グループの外へ出た子孫の報告は入れず、設計の文書から約束を外した	見つけるにはプロセス表を親子でたどる必要があり、たどった PID の使い回しで他人を名指ししかねない	docs/design.md「受け入れた代わりのもの」	見送り
+2026-10-06T23:42:21Z	test	再現された 6 件を回帰テストにし、直す前のコミットの worktree で落ちることを確かめた（5 件はすぐ。ログの 1 件は B の再現の形にして 3 回とも落ちる）	テストが不具合を捕まえることを、壊れた版で確かめる	/tmp/devsrv-old（e37e0ef）, tests/cli.rs	古い版で落ち、新しい版で 25 件すべて通る

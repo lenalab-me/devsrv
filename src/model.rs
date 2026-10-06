@@ -146,6 +146,9 @@ pub struct Spec {
     pub ready: Ready,
     pub timeout_ms: u64,
     pub created: UnixMs,
+    /// Which `devsrv start` this is: the starting call accepts only a record of its own
+    /// run, never the result of a later start of the same name.
+    pub run: String,
 }
 
 impl Spec {
@@ -196,6 +199,9 @@ pub enum End {
         cause: Cause,
         /// Group members still alive after KILL.
         survivors: Vec<i32>,
+        /// The group could not be read at the end: that nothing is left is not known.
+        #[serde(default)]
+        unconfirmed: bool,
     },
 }
 

@@ -147,22 +147,15 @@ impl Child {
     pub fn group(&self) -> OwnedGroup<'_> {
         OwnedGroup {
             pgid: self.pid,
+            leader: None,
             _owner: PhantomData,
         }
     }
 
-    /// Empties the child's group, and makes sure the child itself has exited, so that
-    /// `reap` cannot block on a listing that missed it.
+    /// Empties the child's group and waits for the child itself to exit, so that `reap`
+    /// cannot block.
     pub fn terminate_group(&self, grace: Duration) -> Terminated {
-        let group = self.group();
-        let mut t = group.terminate(grace);
-        let end = Instant::now() + Duration::from_secs(2);
-        while !self.exited() && Instant::now() < end {
-            group.signal(libc::SIGKILL);
-            t.forced = true;
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        t
+        self.group().terminate(grace, || self.exited())
     }
 
     /// Reaps the child and reads how it ended. Blocks until it has exited.
@@ -192,44 +185,80 @@ impl Child {
 /// What `terminate` did.
 #[derive(Clone, Debug, Default)]
 pub struct Terminated {
-    /// TERM was not enough and KILL was sent.
+    /// The grace period ran out and KILL was sent.
     pub forced: bool,
-    /// Members still alive after KILL, or unknown when the group could not be read.
+    /// Members still alive after KILL.
     pub survivors: Vec<i32>,
+    /// The group could not be read, so "nothing is left" is not known.
+    pub unconfirmed: bool,
 }
 
 /// A process group devsrv has proved to be its own: the only thing in the crate that can
 /// be signalled. Two ways to get one, and no other (the fields are private):
 ///
-/// - `Child::group`: the leader is our unreaped child. No time window.
+/// - `Child::group`: the leader is our unreaped child, so its pid, and the pgid, cannot
+///   be reused. No time window.
 /// - `OwnedGroup::verify`: the recorded leader still runs with the recorded start time.
-///   Only for a name whose supervisor is gone. Between the check and the signal the pid
-///   would have to be freed, reaped and reused as a new group leader.
+///   Only for a name whose supervisor is gone. The proof is checked again right before
+///   every signal (the leader still matches, or the group still has members, which
+///   keeps the pgid from being reused); between that check and the signal the group
+///   would have to empty and its id be reused.
 pub struct OwnedGroup<'a> {
     pgid: i32,
+    /// `Some` for a verified group: the leader to check again before each signal.
+    leader: Option<ProcRef>,
     _owner: PhantomData<&'a Child>,
+}
+
+fn leader_matches(leader: &ProcRef) -> Lookup<()> {
+    if leader.started.0.is_empty() {
+        // The start time could not be read at spawn: nothing to compare with.
+        return Lookup::Denied;
+    }
+    match proc_info(leader.pid) {
+        Lookup::Found(p) if !p.zombie && p.pgid == leader.pid && p.started == leader.started => {
+            Lookup::Found(())
+        }
+        Lookup::Found(_) | Lookup::Gone => Lookup::Gone,
+        Lookup::Denied => Lookup::Denied,
+    }
 }
 
 impl OwnedGroup<'static> {
     pub fn verify(leader: &ProcRef) -> Lookup<OwnedGroup<'static>> {
-        match proc_info(leader.pid) {
-            Lookup::Found(p)
-                if !p.zombie && p.pgid == leader.pid && p.started == leader.started =>
-            {
-                Lookup::Found(OwnedGroup {
-                    pgid: leader.pid,
-                    _owner: PhantomData,
-                })
-            }
-            Lookup::Found(_) | Lookup::Gone => Lookup::Gone,
+        match leader_matches(leader) {
+            Lookup::Found(()) => Lookup::Found(OwnedGroup {
+                pgid: leader.pid,
+                leader: Some(leader.clone()),
+                _owner: PhantomData,
+            }),
+            Lookup::Gone => Lookup::Gone,
             Lookup::Denied => Lookup::Denied,
         }
+    }
+
+    /// Stops a verified group. "Done" needs the leader gone too, as for a child.
+    pub fn terminate_verified(&self, grace: Duration) -> Terminated {
+        let leader = self.leader.clone().expect("built by verify");
+        self.terminate(grace, || {
+            !matches!(leader_matches(&leader), Lookup::Found(()))
+        })
     }
 }
 
 impl OwnedGroup<'_> {
+    fn may_signal(&self) -> bool {
+        match &self.leader {
+            None => true,
+            Some(l) => {
+                matches!(leader_matches(l), Lookup::Found(()))
+                    || self.members().is_some_and(|m| !m.is_empty())
+            }
+        }
+    }
+
     fn signal(&self, sig: libc::c_int) {
-        if self.pgid <= 1 {
+        if self.pgid <= 1 || !self.may_signal() {
             return;
         }
         // SAFETY: plain syscall. The target is a process group we proved to be ours.
@@ -243,30 +272,39 @@ impl OwnedGroup<'_> {
             .map(|v| v.into_iter().map(|p| p.pid).collect())
     }
 
-    /// TERM, wait up to `grace` for the group to empty, KILL, wait up to 2 s. TERM is
-    /// sent even when the group looks empty: a listing can miss a member, and a signal
-    /// to an empty group of ours reaches nobody.
-    pub fn terminate(&self, grace: Duration) -> Terminated {
+    /// TERM, wait up to `grace` for the group to empty and `leader_gone`, KILL, wait up
+    /// to 2 s. TERM is sent even when the group looks empty: a listing can miss a member,
+    /// and a signal to an empty group of ours reaches nobody.
+    fn terminate(&self, grace: Duration, leader_gone: impl Fn() -> bool) -> Terminated {
         self.signal(libc::SIGTERM);
-        if self.wait_empty(grace) {
+        if self.wait_gone(grace, &leader_gone) {
             return Terminated::default();
         }
         self.signal(libc::SIGKILL);
-        let empty = self.wait_empty(Duration::from_secs(2));
-        Terminated {
-            forced: true,
-            survivors: if empty {
-                vec![]
-            } else {
-                self.members().unwrap_or_default()
+        if self.wait_gone(Duration::from_secs(2), &leader_gone) {
+            return Terminated {
+                forced: true,
+                ..Terminated::default()
+            };
+        }
+        match self.members() {
+            Some(m) if !m.is_empty() => Terminated {
+                forced: true,
+                survivors: m,
+                unconfirmed: false,
+            },
+            _ => Terminated {
+                forced: true,
+                survivors: vec![],
+                unconfirmed: true,
             },
         }
     }
 
-    fn wait_empty(&self, limit: Duration) -> bool {
+    fn wait_gone(&self, limit: Duration, leader_gone: &impl Fn() -> bool) -> bool {
         let end = Instant::now() + limit;
         loop {
-            if self.members().is_some_and(|m| m.is_empty()) {
+            if self.members().is_some_and(|m| m.is_empty()) && leader_gone() {
                 return true;
             }
             if Instant::now() >= end {

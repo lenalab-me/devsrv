@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::cli::{PortArg, StartArgs, WaitTarget};
-use crate::model::{Cause, End, Name, Ready, Record, Scope, Spec, State, UnixMs, human};
+use crate::model::{Cause, End, Name, ProcRef, Ready, Record, Scope, Spec, State, UnixMs, human};
 use crate::os::{self, ExitStatus, Lookup, OwnedGroup};
 use crate::probe::{self, Condition, Outcome};
-use crate::report::{Failure, NOT_MET, Output, USAGE};
+use crate::report::{Failure, NOT_MET, Output, SYSTEM, USAGE};
 use crate::store::{Instance, Project, Status, Store};
 use crate::supervisor;
 
@@ -69,13 +69,25 @@ fn status_text(s: ExitStatus) -> String {
     }
 }
 
+/// Is the command alive? For an orphan (its supervisor is gone) the OS is asked whether
+/// the recorded command still runs with the recorded start time.
+fn alive(record: &Record, status: Status) -> bool {
+    match (status, &record.state) {
+        (Status::Starting | Status::Ready, _) => true,
+        (Status::Orphan, State::Up { child, .. }) => {
+            !matches!(OwnedGroup::verify(child), Lookup::Gone)
+        }
+        _ => false,
+    }
+}
+
 /// One process as `ls`, `start` failures and `who` show it.
 fn view(inst: &Instance, record: &Record, status: Status) -> Value {
     let spec = &record.spec;
     let mut v = json!({
         "name": inst.name.as_str(),
         "state": status.word(),
-        "alive": matches!(status, Status::Starting | Status::Ready),
+        "alive": alive(record, status),
         "port": spec.port,
         "dir": spec.scope.path(),
         "cwd": spec.cwd,
@@ -244,6 +256,14 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
         ready: args.ready.clone(),
         timeout_ms: args.timeout.as_millis() as u64,
         created: UnixMs::now(),
+        run: format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ),
     };
     let fail_io = |what: &str, e: std::io::Error| Failure::system(format!("cannot {what}: {e}"));
     claim
@@ -283,7 +303,9 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
     let started = Instant::now();
     let limit = args.timeout + Duration::from_secs(15);
     loop {
-        match inst.read()? {
+        // Only this run's record counts: once it is Down, another start may replace it.
+        let mine = inst.read()?.filter(|r| r.spec.run == spec.run);
+        match mine {
             Some(Record {
                 state:
                     State::Up {
@@ -310,13 +332,21 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
         }
         if let Ok(Some(_)) = sup.try_wait()
             && !matches!(
-                inst.read()?,
+                inst.read()?.filter(|r| r.spec.run == spec.run),
                 Some(Record {
                     state: State::Down { .. } | State::Up { ready: Some(_), .. },
                     ..
                 })
             )
         {
+            if inst.read()?.is_some_and(|r| r.spec.run != spec.run) {
+                return Err(Failure::new(
+                    NOT_MET,
+                    "replaced",
+                    format!("{name} ended, and was started again by another devsrv start before this one saw how"),
+                )
+                .hint("devsrv ls shows what runs now"));
+            }
             let err = fs::read_to_string(inst.supervisor_err_path()).unwrap_or_default();
             let mut f = Failure::system(format!(
                 "the devsrv supervisor of {name} stopped without a result"
@@ -339,7 +369,38 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
     }
 }
 
+/// What is left of a run that ended, when something is: "" when nothing is.
+fn leftovers(end: &End) -> Option<String> {
+    match end {
+        End::Exited { survivors, .. } if !survivors.is_empty() => Some(format!(
+            "pids {} of its group are still alive after KILL",
+            survivors
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        End::Exited {
+            unconfirmed: true, ..
+        } => Some("devsrv could not read its process group to confirm that nothing is left".into()),
+        _ => None,
+    }
+}
+
 fn start_failure(inst: &Instance, spec: &Spec, end: &End) -> Failure {
+    let f = start_failure_cause(inst, spec, end);
+    match leftovers(end) {
+        Some(left) => Failure {
+            code: f.code.max(NOT_MET),
+            ..f
+        }
+        .detail(format!("warning: {left}")),
+        None if matches!(end, End::Exited { .. }) => f.hint("nothing of it is left running"),
+        None => f,
+    }
+}
+
+fn start_failure_cause(inst: &Instance, spec: &Spec, end: &End) -> Failure {
     let name = &inst.name;
     let after = human(spec.created.elapsed());
     match end {
@@ -368,7 +429,7 @@ fn start_failure(inst: &Instance, spec: &Spec, end: &End) -> Failure {
                     status_text(*status)
                 ),
             )
-            .hint("fix the command and start again; nothing is left running")
+            .hint("fix the command and start again")
             .data(json!({ "exit": status })),
             inst,
         ),
@@ -451,10 +512,12 @@ fn line(inst: &Instance, record: &Record, status: Status) -> String {
             }
         },
     };
-    let extra = if status == Status::Orphan {
-        format!("supervisor gone; devsrv stop {} stops it", inst.name)
-    } else {
-        extra
+    let extra = match status {
+        Status::Orphan if alive(record, status) => {
+            format!("supervisor gone; devsrv stop {} stops it", inst.name)
+        }
+        Status::Orphan => "supervisor gone; the command is gone too".into(),
+        _ => extra,
     };
     format!(
         "{:<12} {:<8} {:>6} {:>5} {:>7}  {}  {}",
@@ -482,7 +545,7 @@ pub fn ls(all: bool) -> Result<Output, Failure> {
             let Some((record, status)) = inst.status()? else {
                 continue;
             };
-            if matches!(status, Status::Starting | Status::Ready) {
+            if self::alive(&record, status) {
                 alive += 1;
             } else {
                 dead += 1;
@@ -562,7 +625,8 @@ pub fn logs(
 fn follow_log(inst: &Instance, cond: Condition, timeout: Duration) -> Result<Output, Failure> {
     let name = &inst.name;
     let ended = || match inst.status() {
-        Ok(Some((_, Status::Down | Status::Orphan))) | Ok(None) => Some(()),
+        Ok(Some((record, status))) if !alive(&record, status) => Some(()),
+        Ok(None) => Some(()),
         _ => None,
     };
     let mut gone_once = false;
@@ -588,142 +652,180 @@ fn follow_log(inst: &Instance, cond: Condition, timeout: Duration) -> Result<Out
     }
 }
 
-/// Stops one name. `Ok(text)` or a failure.
-fn stop_one(inst: &Instance) -> Result<(String, Value), Failure> {
+/// The result of a stop, from the final record of the run that was stopped.
+fn stopped(
+    name: &Name,
+    end: &End,
+    how_long: Duration,
+    note: &str,
+) -> Result<(String, Value), Failure> {
+    if let Some(left) = leftovers(end) {
+        let code = if matches!(
+            end,
+            End::Exited {
+                unconfirmed: true,
+                ..
+            }
+        ) {
+            SYSTEM
+        } else {
+            NOT_MET
+        };
+        return Err(Failure::new(
+            code,
+            "not_confirmed",
+            format!("{name}: {left}"),
+        ));
+    }
+    let how = match end {
+        End::Exited {
+            cause: Cause::Stopped { forced: true },
+            ..
+        } => "KILL",
+        End::Exited {
+            cause: Cause::Stopped { forced: false },
+            ..
+        } => "TERM",
+        _ => "it had exited",
+    };
+    Ok((
+        format!("{name}: stopped ({how}, {}{note})", human(how_long)),
+        json!({ "name": name.as_str(), "result": "stopped", "how": how }),
+    ))
+}
+
+/// Stops a name whose supervisor is gone: the command is checked against its recorded
+/// start time before every signal, and the final record is written here.
+fn stop_orphan(
+    inst: &Instance,
+    record: &Record,
+    child: &ProcRef,
+) -> Result<(String, Value), Failure> {
     let name = &inst.name;
-    let (record, status) = known(inst)?;
-    let done =
-        |text: String, how: &str| Ok((text, json!({ "name": name.as_str(), "result": how })));
-    match (status, &record.state) {
-        (Status::Down, State::Down { ended, .. }) => done(
-            format!("{name}: already stopped ({} ago)", human(ended.elapsed())),
-            "already_stopped",
-        ),
-        (Status::Starting | Status::Ready, State::Up { child, .. }) => {
-            fs::write(inst.stop_path(), child.token())
-                .map_err(|e| Failure::system(format!("cannot write the stop request: {e}")))?;
-            let t0 = Instant::now();
-            while inst.lock_held() {
-                if t0.elapsed() > Duration::from_secs(15) {
-                    return Err(Failure::system(format!(
-                        "the supervisor of {name} did not finish stopping it within 15s"
-                    ))
-                    .hint(format!(
-                        "devsrv ls shows its state; devsrv logs {name} shows its output"
-                    )));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            match inst.read()? {
-                Some(Record {
-                    state:
-                        State::Down {
-                            end:
-                                End::Exited {
-                                    survivors, cause, ..
-                                },
-                            ..
-                        },
-                    ..
-                }) => {
-                    if !survivors.is_empty() {
-                        let pids = survivors
-                            .iter()
-                            .map(|p| p.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        return Err(Failure::new(
-                            NOT_MET,
-                            "survivors",
-                            format!("{name}: sent KILL, but pids {pids} are still alive"),
-                        ));
-                    }
-                    let how = if matches!(cause, Cause::Stopped { forced: true }) {
-                        "KILL"
-                    } else {
-                        "TERM"
-                    };
-                    let how = if matches!(cause, Cause::Stopped { .. }) {
-                        how
-                    } else {
-                        "it had exited"
-                    };
-                    done(
-                        format!("{name}: stopped ({how}, {})", human(t0.elapsed())),
-                        "stopped",
-                    )
-                }
-                _ => done(format!("{name}: stopped"), "stopped"),
-            }
-        }
-        (Status::Orphan, State::Up { child, .. }) => {
-            let claim = match inst.claim()? {
-                Ok(c) => c,
-                Err(_) => {
-                    return Err(Failure::new(
-                        NOT_MET,
-                        "busy",
-                        format!("{name} is being started or stopped by another devsrv"),
-                    )
-                    .hint("try again"));
-                }
-            };
-            let (text, status, forced) = match OwnedGroup::verify(child) {
-                Lookup::Found(group) => {
-                    let t = group.terminate(Duration::from_secs(5));
-                    if !t.survivors.is_empty() {
-                        return Err(Failure::new(
-                            NOT_MET,
-                            "survivors",
-                            format!(
-                                "{name}: sent KILL, but pids {:?} are still alive",
-                                t.survivors
-                            ),
-                        ));
-                    }
-                    (
-                        format!(
-                            "{name}: stopped ({}; its supervisor was gone)",
-                            if t.forced { "KILL" } else { "TERM" }
-                        ),
-                        "stopped",
-                        t.forced,
-                    )
-                }
-                Lookup::Gone => (
-                    format!("{name}: already stopped (its supervisor was gone)"),
-                    "already_stopped",
-                    false,
-                ),
-                Lookup::Denied => {
-                    return Err(Failure::system(format!(
-                        "cannot tell whether pid {} of {name} is still the one devsrv started; nothing was sent",
-                        child.pid
-                    )));
-                }
-            };
-            let end = End::Exited {
-                pid: child.pid,
-                status: ExitStatus::Unknown,
-                cause: Cause::Stopped { forced },
-                survivors: vec![],
-            };
-            let _ = claim.write(&Record {
-                v: record.v,
-                spec: record.spec.clone(),
-                state: State::Down {
-                    ended: UnixMs::now(),
-                    end,
-                },
-            });
-            done(text, status)
-        }
-        _ => Err(Failure::new(
+    let Ok(claim) = inst.claim()? else {
+        return Err(Failure::new(
             NOT_MET,
             "busy",
-            format!("{name} is being started by another devsrv"),
+            format!("{name} is being started or stopped by another devsrv"),
         )
-        .hint("try again in a moment")),
+        .hint("try again in a moment"));
+    };
+    let t0 = Instant::now();
+    let (cause, t) = match OwnedGroup::verify(child) {
+        Lookup::Found(group) => {
+            let t = group.terminate_verified(Duration::from_secs(5));
+            (Cause::Stopped { forced: t.forced }, t)
+        }
+        Lookup::Gone => (Cause::OnItsOwn, os::Terminated::default()),
+        Lookup::Denied => {
+            return Err(Failure::system(format!(
+                "cannot tell whether pid {} of {name} is still the process devsrv started; nothing was sent",
+                child.pid
+            )));
+        }
+    };
+    let gone_before = matches!(cause, Cause::OnItsOwn);
+    let end = End::Exited {
+        pid: child.pid,
+        status: ExitStatus::Unknown,
+        cause,
+        survivors: t.survivors,
+        unconfirmed: t.unconfirmed,
+    };
+    let down = Record {
+        v: record.v,
+        spec: record.spec.clone(),
+        state: State::Down {
+            ended: UnixMs::now(),
+            end: end.clone(),
+        },
+    };
+    claim
+        .write(&down)
+        .map_err(|e| Failure::system(format!("cannot write the record of {name}: {e}")))?;
+    if gone_before {
+        return Ok((
+            format!("{name}: already stopped (its supervisor was gone)"),
+            json!({ "name": name.as_str(), "result": "already_stopped" }),
+        ));
+    }
+    stopped(name, &end, t0.elapsed(), "; its supervisor was gone")
+}
+
+/// Stops one name. Reads the record again on every turn instead of deciding once: the
+/// supervisor may die while stopping, and a start may be between taking the lock and
+/// writing its first record.
+fn stop_one(inst: &Instance) -> Result<(String, Value), Failure> {
+    let name = &inst.name;
+    let t0 = Instant::now();
+    // The run this call asked to stop (the command, by pid and start time).
+    let mut requested: Option<ProcRef> = None;
+    loop {
+        if t0.elapsed() > Duration::from_secs(20) {
+            return Err(
+                Failure::system(format!("{name} did not stop within 20s")).hint(format!(
+                    "devsrv ls shows its state; devsrv logs {name} shows its output"
+                )),
+            );
+        }
+        match inst.status()? {
+            None if inst.lock_held() => {}
+            None if requested.is_some() => {
+                return Ok((
+                    format!("{name}: stopped"),
+                    json!({ "name": name.as_str(), "result": "stopped" }),
+                ));
+            }
+            None => {
+                return Err(Failure::new(
+                    NOT_MET,
+                    "unknown_name",
+                    format!("nothing named {name} was started here"),
+                )
+                .hint("devsrv ls shows the names"));
+            }
+            Some((record, status)) => match (&record.state, status) {
+                (State::Down { end, ended }, Status::Down) => {
+                    return match &requested {
+                        Some(_) => stopped(name, end, t0.elapsed(), ""),
+                        None => Ok((
+                            format!("{name}: already stopped ({} ago)", human(ended.elapsed())),
+                            json!({ "name": name.as_str(), "result": "already_stopped" }),
+                        )),
+                    };
+                }
+                (State::Up { child, .. }, Status::Orphan) => {
+                    if requested.as_ref().is_some_and(|r| r != child) {
+                        return Ok((
+                            format!("{name}: stopped"),
+                            json!({ "name": name.as_str(), "result": "stopped" }),
+                        ));
+                    }
+                    return stop_orphan(inst, &record, child);
+                }
+                (State::Up { child, .. }, Status::Starting | Status::Ready) => match &requested {
+                    None => {
+                        fs::write(inst.stop_path(), child.token()).map_err(|e| {
+                            Failure::system(format!("cannot write the stop request: {e}"))
+                        })?;
+                        requested = Some(child.clone());
+                    }
+                    Some(r) if r != child => {
+                        return Ok((
+                            format!(
+                                "{name}: stopped; it has been started again since (pid {})",
+                                child.pid
+                            ),
+                            json!({ "name": name.as_str(), "result": "stopped" }),
+                        ));
+                    }
+                    Some(_) => {}
+                },
+                // A start holds the lock and has not written its record yet.
+                _ => {}
+            },
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -733,11 +835,11 @@ pub fn stop(names: Vec<Name>, all: bool) -> Result<Output, Failure> {
         project
             .instances()
             .into_iter()
-            .filter(|i| {
-                matches!(
-                    i.status(),
-                    Ok(Some((_, Status::Starting | Status::Ready | Status::Orphan)))
-                )
+            // A record that cannot be read is kept, so that its error is reported.
+            .filter(|i| match i.status() {
+                Ok(Some((record, status))) => alive(&record, status),
+                Ok(None) => i.lock_held(),
+                Err(_) => true,
             })
             .collect()
     } else {
@@ -795,7 +897,8 @@ pub fn who(port: u16) -> Result<Output, Failure> {
     let mut ours = Vec::new();
     for p in store.projects() {
         for inst in p.instances() {
-            if let Ok(Some((record, status @ (Status::Starting | Status::Ready)))) = inst.status()
+            if let Ok(Some((record, status))) = inst.status()
+                && alive(&record, status)
                 && let State::Up { child, .. } = &record.state
             {
                 ours.push((child.clone(), inst, record.clone(), status));
@@ -823,8 +926,13 @@ pub fn who(port: u16) -> Result<Output, Failure> {
                 } else {
                     record.spec.scope.path().display().to_string()
                 };
+                let orphan = if *status == Status::Orphan {
+                    format!("  (supervisor gone; devsrv stop {} stops it)", inst.name)
+                } else {
+                    String::new()
+                };
                 text.push_str(&format!(
-                    "{port}: {} (devsrv, {place})  pid {pid}  {cmd}  up {}\n",
+                    "{port}: {} (devsrv, {place})  pid {pid}  {cmd}  up {}{orphan}\n",
                     inst.name,
                     human(record.spec.created.elapsed())
                 ));

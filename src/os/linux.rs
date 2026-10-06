@@ -53,11 +53,16 @@ fn all_pids() -> io::Result<Vec<i32>> {
 pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
     let boot = boot_id();
     let mut out = Vec::new();
+    // A process that cannot be read is not taken as absent: the answer would be wrong.
     for pid in all_pids()? {
-        if let Ok(text) = fs::read_to_string(format!("/proc/{pid}/stat"))
-            && let Some(p) = parse_stat(pid, &text, &boot)
-            && p.pgid == pgid
-        {
+        let text = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let p = parse_stat(pid, &text, &boot)
+            .ok_or_else(|| io::Error::other(format!("cannot parse /proc/{pid}/stat")))?;
+        if p.pgid == pgid {
             out.push(p);
         }
     }
@@ -78,9 +83,12 @@ pub fn command_line(pid: i32) -> Option<String> {
 /// Socket inodes listening on `port`, from `/proc/net/tcp` and `tcp6`.
 fn listening_inodes(port: u16) -> io::Result<HashSet<u64>> {
     let mut inodes = HashSet::new();
-    for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = fs::read_to_string(file) else {
-            continue;
+    // tcp6 is missing when IPv6 is off; tcp must be readable.
+    for (file, required) in [("/proc/net/tcp", true), ("/proc/net/tcp6", false)] {
+        let text = match fs::read_to_string(file) {
+            Ok(t) => t,
+            Err(e) if required => return Err(e),
+            Err(_) => continue,
         };
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split_whitespace().collect();
