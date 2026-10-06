@@ -21,7 +21,11 @@ pub struct Output {
 
 impl Output {
     pub fn new(stdout: impl Into<String>, json: Value) -> Output {
-        Output { stdout: stdout.into(), stderr: String::new(), json }
+        Output {
+            stdout: stdout.into(),
+            stderr: String::new(),
+            json,
+        }
     }
     pub fn note(mut self, stderr: impl Into<String>) -> Output {
         self.stderr = stderr.into();
@@ -43,7 +47,14 @@ pub struct Failure {
 
 impl Failure {
     pub fn new(code: u8, kind: &'static str, message: impl Into<String>) -> Failure {
-        Failure { code, kind, message: message.into(), details: vec![], hints: vec![], data: Value::Null }
+        Failure {
+            code,
+            kind,
+            message: message.into(),
+            details: vec![],
+            hints: vec![],
+            data: Value::Null,
+        }
     }
     pub fn usage(message: impl Into<String>) -> Failure {
         Failure::new(USAGE, "usage", message)

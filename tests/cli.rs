@@ -1,0 +1,622 @@
+//! The definition of done (docs/plan.md), checked with real processes. Each test has its
+//! own state directory and project directory, and stops what it started when it ends.
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+struct Env {
+    state: tempfile::TempDir,
+    projects: Vec<tempfile::TempDir>,
+}
+
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl Env {
+    fn new() -> Env {
+        let mut e = Env {
+            state: tempfile::tempdir().unwrap(),
+            projects: vec![],
+        };
+        e.add_project();
+        e
+    }
+
+    /// A new project directory (a git top level), usable with `run_in`.
+    fn add_project(&mut self) -> usize {
+        let p = tempfile::tempdir().unwrap();
+        std::fs::create_dir(p.path().join(".git")).unwrap();
+        self.projects.push(p);
+        self.projects.len() - 1
+    }
+
+    fn run_in(&self, project: usize, args: &[&str]) -> Run {
+        let out = Command::new(env!("CARGO_BIN_EXE_devsrv"))
+            .args(args)
+            .current_dir(self.projects[project].path())
+            .env("DEVSRV_STATE_DIR", self.state.path())
+            .output()
+            .unwrap();
+        Run {
+            code: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into(),
+        }
+    }
+
+    fn run(&self, args: &[&str]) -> Run {
+        self.run_in(0, args)
+    }
+
+    fn json(&self, args: &[&str]) -> Value {
+        let mut a = vec!["--json"];
+        a.extend_from_slice(args);
+        serde_json::from_str(&self.run(&a).stdout).unwrap()
+    }
+
+    fn process(&self, name: &str) -> Value {
+        let ls = self.json(&["ls"]);
+        ls["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == name)
+            .cloned()
+            .unwrap()
+    }
+
+    fn record_path(&self, name: &str) -> PathBuf {
+        let dir = std::fs::read_dir(self.state.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        dir.join(name).join("record.json")
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        for i in 0..self.projects.len() {
+            self.run_in(i, &["stop", "--all"]);
+        }
+    }
+}
+
+fn http_get(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://")?;
+    let hostport = rest.split('/').next()?;
+    let mut s = TcpStream::connect(hostport).ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    s.write_all(b"GET / HTTP/1.0\r\n\r\n").ok()?;
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).ok()?;
+    buf.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Is any process of this group alive? Asks `ps`, not devsrv.
+fn group_alive(pgid: i64) -> bool {
+    let out = Command::new("ps")
+        .args(["-A", "-o", "pgid=,stat="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).lines().any(|l| {
+        let mut f = l.split_whitespace();
+        f.next().and_then(|p| p.parse::<i64>().ok()) == Some(pgid)
+            && !f.next().unwrap_or("").starts_with('Z')
+    })
+}
+
+fn pid_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// A process devsrv did not start, leading its own group so that a wrong group signal
+/// would reach it. Killed when the test ends, pass or fail.
+struct Stranger(std::process::Child);
+
+impl Stranger {
+    fn new() -> Stranger {
+        use std::os::unix::process::CommandExt;
+        Stranger(
+            Command::new("sleep")
+                .arg("300")
+                .process_group(0)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+}
+
+impl Drop for Stranger {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn eventually(limit: Duration, mut f: impl FnMut() -> bool) -> bool {
+    let end = Instant::now() + limit;
+    while Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    f()
+}
+
+const SERVER: &[&str] = &[
+    "--port",
+    "auto",
+    "--",
+    "python3",
+    "-m",
+    "http.server",
+    "{port}",
+];
+
+fn start_server(env: &Env, name: &str) -> String {
+    let mut args = vec!["start", name];
+    args.extend_from_slice(SERVER);
+    let r = env.run(&args);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    r.stdout
+}
+
+#[test]
+fn c01_start_returns_a_reachable_url_on_one_line() {
+    let env = Env::new();
+    let out = start_server(&env, "web");
+    assert_eq!(out.lines().count(), 1, "{out:?}");
+    let url = out.trim();
+    assert!(
+        url.starts_with("http://127.0.0.1:") && url.ends_with('/'),
+        "{url}"
+    );
+    assert_eq!(http_get(url), Some(200));
+}
+
+#[test]
+fn c02_a_command_that_dies_at_once_fails_with_its_code_and_log() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "api",
+        "--",
+        "sh",
+        "-c",
+        "echo 'config.toml: no such file' >&2; exit 3",
+    ]);
+    assert_eq!(r.code, 1);
+    assert_eq!(r.stdout, "");
+    let first = r.stderr.lines().next().unwrap();
+    assert!(first.contains("api exited with code 3"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("| config.toml: no such file"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("hint:"), "{}", r.stderr);
+}
+
+#[test]
+fn c03_a_second_start_fails_and_says_what_runs() {
+    let env = Env::new();
+    let url = start_server(&env, "web");
+    let mut args = vec!["start", "web"];
+    args.extend_from_slice(SERVER);
+    let r = env.run(&args);
+    assert_eq!(r.code, 1);
+    let first = r.stderr.lines().next().unwrap();
+    assert!(
+        first.contains("web is already started")
+            && first.contains(url.trim())
+            && first.contains(" up "),
+        "{first}"
+    );
+    assert!(r.stderr.contains("devsrv stop web"), "{}", r.stderr);
+    assert_eq!(env.run(&["stop", "web"]).code, 0);
+    assert_eq!(env.run(&args).code, 0, "starts again after stop");
+}
+
+#[test]
+fn c03_a_dead_record_is_cleaned_up_and_started_over() {
+    let env = Env::new();
+    let r = env.run(&["start", "short", "--", "sh", "-c", "sleep 0.7"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(eventually(Duration::from_secs(5), || env.process("short")
+        ["state"]
+        == "dead"));
+    let r = env.run(&["start", "short", "--", "sleep", "300"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(env.process("short")["state"], "ready");
+}
+
+#[test]
+fn c04_stop_takes_the_grandchildren_and_twice_is_fine() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "tree",
+        "--",
+        "sh",
+        "-c",
+        "sleep 300 & sleep 301 & wait",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let pgid = env.process("tree")["pid"].as_i64().unwrap();
+    assert!(group_alive(pgid));
+    let r = env.run(&["stop", "tree"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("tree: stopped (TERM"), "{}", r.stdout);
+    assert!(!group_alive(pgid), "the whole group is gone");
+    let r = env.run(&["stop", "tree"]);
+    assert_eq!(r.code, 0);
+    assert!(r.stdout.contains("already stopped"), "{}", r.stdout);
+}
+
+#[test]
+fn c04_a_group_that_ignores_term_gets_kill() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "deaf",
+        "--",
+        "sh",
+        "-c",
+        "trap '' TERM; sleep 300 & wait",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let pgid = env.process("deaf")["pid"].as_i64().unwrap();
+    let r = env.run(&["stop", "deaf"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("deaf: stopped (KILL"), "{}", r.stdout);
+    assert!(!group_alive(pgid));
+}
+
+#[test]
+fn c05_a_reused_pid_is_not_signalled() {
+    let env = Env::new();
+    assert_eq!(env.run(&["start", "x", "--", "sleep", "300"]).code, 0);
+    let path = env.record_path("x");
+    let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // Kill the supervisor and the command behind devsrv's back...
+    let sup = record["state"]["up"]["supervisor"]["pid"].as_i64().unwrap();
+    let child = record["state"]["up"]["child"]["pid"].as_i64().unwrap();
+    Command::new("kill")
+        .args(["-KILL", &sup.to_string()])
+        .status()
+        .unwrap();
+    Command::new("kill")
+        .args(["-KILL", &format!("-{child}")])
+        .status()
+        .unwrap();
+    assert!(eventually(Duration::from_secs(5), || !group_alive(child)));
+    // ...and point the record at someone else's process, as if the pid were reused.
+    let mut stranger = Stranger::new();
+    record["state"]["up"]["child"]["pid"] = stranger.0.id().into();
+    std::fs::write(&path, record.to_string()).unwrap();
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("x")["state"] == "orphan"
+    ));
+    let r = env.run(&["stop", "x"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("already stopped"), "{}", r.stdout);
+    assert!(
+        stranger.0.try_wait().unwrap().is_none(),
+        "the stranger still runs"
+    );
+    assert!(pid_alive(stranger.0.id()));
+}
+
+#[test]
+fn c06_wait_times_out_on_a_free_port_and_succeeds_on_a_server() {
+    let env = Env::new();
+    let free = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let t = Instant::now();
+    let r = env.run(&["wait", "port", &free.to_string(), "--timeout", "1"]);
+    let took = t.elapsed();
+    assert_eq!(r.code, 1);
+    assert!(
+        took >= Duration::from_millis(900) && took < Duration::from_secs(3),
+        "{took:?}"
+    );
+    assert!(r.stderr.contains("not ready within 1.0s"), "{}", r.stderr);
+    let url = start_server(&env, "web");
+    let r = env.run(&["wait", url.trim(), "--timeout", "5"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("ready after "), "{}", r.stdout);
+}
+
+#[test]
+fn c07_who_names_devsrv_processes_and_only_shows_others() {
+    let env = Env::new();
+    let url = start_server(&env, "web");
+    let port = url
+        .trim()
+        .trim_end_matches('/')
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .to_string();
+    let r = env.run(&["who", &port]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .starts_with(&format!("{port}: web (devsrv, this project)")),
+        "{}",
+        r.stdout
+    );
+    let mine = TcpListener::bind("127.0.0.1:0").unwrap();
+    let other = mine.local_addr().unwrap().port().to_string();
+    let r = env.run(&["who", &other]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout.contains(&format!("pid {}", std::process::id())),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("not started by devsrv"), "{}", r.stdout);
+    assert!(
+        TcpStream::connect(mine.local_addr().unwrap()).is_ok(),
+        "still listening"
+    );
+    drop(mine);
+    let r = env.run(&["who", &other]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("free"), "{}", r.stderr);
+}
+
+#[test]
+fn c08_ls_shows_alive_and_dead_in_text_and_json() {
+    let env = Env::new();
+    start_server(&env, "web");
+    env.run(&["start", "api", "--", "sh", "-c", "exit 3"]);
+    let r = env.run(&["ls"]);
+    assert_eq!(r.code, 0);
+    let lines: Vec<&str> = r.stdout.lines().collect();
+    assert!(
+        lines[0].starts_with("1 running, 1 dead in "),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("web")
+            && l.contains("ready")
+            && l.contains("http://127.0.0.1:")),
+        "{}",
+        r.stdout
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("api")
+            && l.contains("dead")
+            && l.contains("exited with code 3")),
+        "{}",
+        r.stdout
+    );
+    let web = env.process("web");
+    assert_eq!(web["alive"], true);
+    assert!(web["pid"].as_i64().unwrap() > 0 && web["port"].as_u64().unwrap() > 0);
+    assert!(web["age_s"].as_f64().is_some() && web["cwd"].as_str().is_some());
+    let api = env.process("api");
+    assert_eq!(api["alive"], false);
+    assert_eq!(api["end"]["exited"]["status"]["code"], 3);
+}
+
+#[test]
+fn c09_logs_tail_and_follow_until() {
+    let env = Env::new();
+    let script = "for i in 1 2 3 4 5 6 7; do echo line$i; done; sleep 300";
+    let r = env.run(&[
+        "start",
+        "talk",
+        "--ready",
+        "log:line7",
+        "--",
+        "sh",
+        "-c",
+        script,
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["logs", "talk", "-n", "5"]);
+    assert_eq!(r.stdout, "line3\nline4\nline5\nline6\nline7\n");
+    let r = env.run(&[
+        "logs",
+        "talk",
+        "--follow-until",
+        "line[5]",
+        "--timeout",
+        "2",
+    ]);
+    assert_eq!((r.code, r.stdout.as_str()), (0, "line5\n"));
+    let r = env.run(&["logs", "talk", "--follow-until", "never", "--timeout", "1"]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr
+            .contains("no line of talk's log matched within 1.0s"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn c10_the_same_name_in_two_projects_does_not_collide() {
+    let mut env = Env::new();
+    let other = env.add_project();
+    let a = env.run(&["start", "web", "--", "sleep", "300"]);
+    let b = env.run_in(other, &["start", "web", "--", "sleep", "301"]);
+    assert_eq!((a.code, b.code), (0, 0), "{} {}", a.stderr, b.stderr);
+    assert_ne!(a.stdout, b.stdout);
+    assert_eq!(env.run(&["stop", "web"]).code, 0);
+    let ls = env.run_in(other, &["ls"]);
+    assert!(
+        ls.stdout
+            .lines()
+            .any(|l| l.starts_with("web") && l.contains("ready")),
+        "{}",
+        ls.stdout
+    );
+}
+
+#[test]
+fn c11_the_first_40_lines_of_help_say_how_to_use_it() {
+    let env = Env::new();
+    let r = env.run(&["--help"]);
+    assert_eq!(r.code, 0);
+    let head: String = r.stdout.lines().take(40).collect::<Vec<_>>().join("\n");
+    for needle in [
+        "Usage:",
+        "devsrv start NAME",
+        "devsrv stop",
+        "devsrv wait",
+        "devsrv who",
+        "devsrv logs",
+        "devsrv ls",
+        "{port}",
+        "Output:",
+        "--json",
+        "Exit status: 0",
+    ] {
+        assert!(head.contains(needle), "missing {needle}");
+    }
+}
+
+#[test]
+fn c12_the_command_outlives_the_shell_that_started_it() {
+    let env = Env::new();
+    let devsrv = env!("CARGO_BIN_EXE_devsrv");
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            &format!("'{devsrv}' start web --port auto -- python3 -m http.server {{port}}; exit 0"),
+        ])
+        .current_dir(env.projects[0].path())
+        .env("DEVSRV_STATE_DIR", env.state.path())
+        .output()
+        .unwrap();
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(http_get(&url), Some(200), "{url}");
+}
+
+#[test]
+fn a_fixed_port_in_use_is_refused_with_its_owner() {
+    let env = Env::new();
+    let mine = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = mine.local_addr().unwrap().port().to_string();
+    let r = env.run(&[
+        "start",
+        "web",
+        "--port",
+        &port,
+        "--",
+        "python3",
+        "-m",
+        "http.server",
+        "{port}",
+    ]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.contains(&format!(
+            "port {port} is in use by pid {}",
+            std::process::id()
+        )),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        env.run(&["ls"]).stdout.starts_with("nothing started"),
+        "nothing was started"
+    );
+}
+
+#[test]
+fn a_command_that_cannot_be_run_is_an_input_error() {
+    let env = Env::new();
+    let r = env.run(&["start", "x", "--", "no-such-command-devsrv"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("cannot run `no-such-command-devsrv`"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn not_ready_in_time_stops_the_command_and_explains() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "deaf",
+        "--port",
+        "auto",
+        "--timeout",
+        "1",
+        "--",
+        "sleep",
+        "300",
+    ]);
+    assert_eq!(r.code, 1);
+    assert!(
+        r.stderr.lines().next().unwrap().contains(
+            "deaf was not ready within 1.0s (last check: connection refused); stopped it"
+        ),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("{port}"),
+        "hints at {{port}}: {}",
+        r.stderr
+    );
+    assert_eq!(env.process("deaf")["state"], "dead");
+}
+
+#[test]
+fn json_failures_go_to_stdout_with_the_exit_code() {
+    let env = Env::new();
+    let r = env.run(&["--json", "stop", "nope"]);
+    assert_eq!(r.code, 1);
+    assert_eq!(r.stderr, "");
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        (v["ok"].clone(), v["error"].clone(), v["exit_code"].clone()),
+        (false.into(), "unknown_name".into(), 1.into())
+    );
+}
+
+#[test]
+fn an_unwritable_state_directory_fails_before_running_anything() {
+    let env = Env::new();
+    let marker = env.projects[0].path().join("ran");
+    let out = Command::new(env!("CARGO_BIN_EXE_devsrv"))
+        .args(["start", "x", "--", "touch", marker.to_str().unwrap()])
+        .current_dir(env.projects[0].path())
+        .env("DEVSRV_STATE_DIR", Path::new("/dev/null/devsrv"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("export DEVSRV_STATE_DIR="));
+    assert!(!marker.exists());
+}

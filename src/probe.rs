@@ -13,12 +13,25 @@ use crate::os::{Lookup, proc_info};
 pub enum Condition {
     /// A final HTTP response from 200 to 499 on `host:port` (or, with no host, on
     /// 127.0.0.1 then ::1).
-    Http { host: Option<String>, port: u16, path: String },
-    Port { host: Option<String>, port: u16 },
-    Log { path: PathBuf, pattern: Regex },
+    Http {
+        host: Option<String>,
+        port: u16,
+        path: String,
+    },
+    Port {
+        host: Option<String>,
+        port: u16,
+    },
+    Log {
+        path: PathBuf,
+        pattern: Regex,
+    },
     File(PathBuf),
     /// The process is gone: no longer there, a zombie, or its pid was reused.
-    Gone { pid: i32, started: Option<crate::model::StartTime> },
+    Gone {
+        pid: i32,
+        started: Option<crate::model::StartTime>,
+    },
     /// The moment has come (`--ready none`: still running after a short while).
     Delay(Instant),
 }
@@ -47,7 +60,11 @@ pub enum Outcome<A> {
 /// Probes until the condition holds, the deadline passes, or `abort` returns something.
 /// The first probe is immediate; then one every 50 ms. A single probe never runs past
 /// the deadline.
-pub fn wait_for<A>(cond: &Condition, limit: Duration, mut abort: impl FnMut() -> Option<A>) -> Outcome<A> {
+pub fn wait_for<A>(
+    cond: &Condition,
+    limit: Duration,
+    mut abort: impl FnMut() -> Option<A>,
+) -> Outcome<A> {
     let start = Instant::now();
     let deadline = start + limit;
     loop {
@@ -70,7 +87,10 @@ fn addrs(host: &Option<String>, port: u16) -> Vec<SocketAddr> {
     match host {
         Some(h) => {
             use std::net::ToSocketAddrs;
-            (h.as_str(), port).to_socket_addrs().map(|a| a.collect()).unwrap_or_default()
+            (h.as_str(), port)
+                .to_socket_addrs()
+                .map(|a| a.collect())
+                .unwrap_or_default()
         }
         None => vec![
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -81,10 +101,14 @@ fn addrs(host: &Option<String>, port: u16) -> Vec<SocketAddr> {
 
 fn connect(addr: &SocketAddr, deadline: Instant) -> Result<TcpStream, String> {
     let left = deadline.saturating_duration_since(Instant::now());
-    let t = left.min(Duration::from_millis(250)).max(Duration::from_millis(1));
+    let t = left
+        .min(Duration::from_millis(250))
+        .max(Duration::from_millis(1));
     TcpStream::connect_timeout(addr, t).map_err(|e| match e.kind() {
         std::io::ErrorKind::ConnectionRefused => "connection refused".to_string(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "connection timed out".to_string(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            "connection timed out".to_string()
+        }
         _ => e.to_string(),
     })
 }
@@ -98,18 +122,31 @@ fn url_host(addr: &SocketAddr, host: &Option<String>) -> String {
 }
 
 /// One HTTP/1.0 GET; the status code, or what went wrong.
-fn http_status(addr: &SocketAddr, host: &str, path: &str, deadline: Instant) -> Result<u16, String> {
+fn http_status(
+    addr: &SocketAddr,
+    host: &str,
+    path: &str,
+    deadline: Instant,
+) -> Result<u16, String> {
     let mut s = connect(addr, deadline)?;
-    let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(50));
+    let left = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(50));
     let _ = s.set_read_timeout(Some(left.min(Duration::from_secs(2))));
     let _ = s.set_write_timeout(Some(left.min(Duration::from_secs(2))));
-    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}:{}\r\nUser-Agent: devsrv\r\nConnection: close\r\n\r\n", addr.port());
-    s.write_all(req.as_bytes()).map_err(|e| format!("could not send the request: {e}"))?;
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}:{}\r\nUser-Agent: devsrv\r\nConnection: close\r\n\r\n",
+        addr.port()
+    );
+    s.write_all(req.as_bytes())
+        .map_err(|e| format!("could not send the request: {e}"))?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     // Skip interim 1xx responses: the first final status line counts.
     loop {
-        let n = s.read(&mut chunk).map_err(|_| "connected, but no HTTP response".to_string())?;
+        let n = s
+            .read(&mut chunk)
+            .map_err(|_| "connected, but no HTTP response".to_string())?;
         if n == 0 {
             return Err("connected, but the connection closed without an HTTP response".into());
         }
@@ -137,7 +174,10 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
                 let h = url_host(&addr, host);
                 match http_status(&addr, &h, path, deadline) {
                     Ok(code) if (200..500).contains(&code) => {
-                        return Ok(Met { what: format!("http://{h}:{port}{path} (HTTP {code})"), host: Some(h) });
+                        return Ok(Met {
+                            what: format!("http://{h}:{port}{path} (HTTP {code})"),
+                            host: Some(h),
+                        });
                     }
                     Ok(code) => seen = format!("HTTP {code}"),
                     Err(e) => seen = e,
@@ -151,7 +191,10 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
                 match connect(&addr, deadline) {
                     Ok(_) => {
                         let h = url_host(&addr, host);
-                        return Ok(Met { what: format!("{h}:{port}"), host: Some(h) });
+                        return Ok(Met {
+                            what: format!("{h}:{port}"),
+                            host: Some(h),
+                        });
                     }
                     Err(e) => seen = e,
                 }
@@ -223,7 +266,9 @@ pub fn find_line(path: &Path, pattern: &Regex) -> Option<String> {
 /// The last `n` lines of a file, reading at most the last 1 MiB, and the total count
 /// of lines in what was read.
 pub fn tail(path: &Path, n: usize) -> (Vec<String>, usize) {
-    let Ok(mut f) = fs::File::open(path) else { return (vec![], 0) };
+    let Ok(mut f) = fs::File::open(path) else {
+        return (vec![], 0);
+    };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let from = len.saturating_sub(1 << 20);
     let _ = f.seek(SeekFrom::Start(from));
@@ -235,7 +280,13 @@ pub fn tail(path: &Path, n: usize) -> (Vec<String>, usize) {
         lines.remove(0);
     }
     let total = lines.len();
-    (lines[total.saturating_sub(n)..].iter().map(|l| l.to_string()).collect(), total)
+    (
+        lines[total.saturating_sub(n)..]
+            .iter()
+            .map(|l| l.to_string())
+            .collect(),
+        total,
+    )
 }
 
 #[cfg(test)]
@@ -244,7 +295,10 @@ mod tests {
 
     #[test]
     fn ansi_is_removed() {
-        assert_eq!(strip_ansi("\x1b[32m  ➜  Local:\x1b[0m http://x"), "  ➜  Local: http://x");
+        assert_eq!(
+            strip_ansi("\x1b[32m  ➜  Local:\x1b[0m http://x"),
+            "  ➜  Local: http://x"
+        );
     }
 
     #[test]
@@ -253,7 +307,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("log");
         fs::write(&p, "1\n2\n3\n4\n5\n6\n7").unwrap();
-        assert_eq!(tail(&p, 5), (vec!["3", "4", "5", "6", "7"].into_iter().map(String::from).collect(), 7));
+        assert_eq!(
+            tail(&p, 5),
+            (
+                vec!["3", "4", "5", "6", "7"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                7
+            )
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 }

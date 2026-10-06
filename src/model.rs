@@ -42,7 +42,10 @@ pub struct Scope(PathBuf);
 impl Scope {
     pub fn of(cwd: &Path) -> std::io::Result<Scope> {
         let cwd = cwd.canonicalize()?;
-        let top = cwd.ancestors().find(|d| d.join(".git").exists()).unwrap_or(&cwd);
+        let top = cwd
+            .ancestors()
+            .find(|d| d.join(".git").exists())
+            .unwrap_or(&cwd);
         Ok(Scope(top.to_path_buf()))
     }
     pub fn from_recorded(path: PathBuf) -> Scope {
@@ -62,7 +65,18 @@ impl Scope {
         let base: String = self
             .0
             .file_name()
-            .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect())
+            .map(|n| {
+                n.to_string_lossy()
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || "._-".contains(c) {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect()
+            })
             .unwrap_or_else(|| "root".into());
         format!("{base}-{h:016x}")
     }
@@ -75,7 +89,12 @@ pub struct UnixMs(pub u64);
 
 impl UnixMs {
     pub fn now() -> UnixMs {
-        UnixMs(SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0))
+        UnixMs(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+        )
     }
     pub fn elapsed(self) -> Duration {
         Duration::from_millis(UnixMs::now().0.saturating_sub(self.0))
@@ -151,7 +170,11 @@ pub struct Record {
 #[serde(rename_all = "snake_case")]
 pub enum State {
     /// The command was spawned. `ready: None` while the supervisor still waits.
-    Up { supervisor: ProcRef, child: ProcRef, ready: Option<ReadyInfo> },
+    Up {
+        supervisor: ProcRef,
+        child: ProcRef,
+        ready: Option<ReadyInfo>,
+    },
     /// Final. Holds nothing to signal.
     Down { ended: UnixMs, end: End },
 }

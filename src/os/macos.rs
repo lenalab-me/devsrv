@@ -13,9 +13,8 @@ pub fn proc_info(pid: i32) -> Lookup<ProcInfo> {
     // SAFETY: an all-zero proc_bsdinfo is valid; proc_pidinfo fills at most `size` bytes.
     let mut bi: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let n = unsafe {
-        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut bi).cast(), size)
-    };
+    let n =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut bi).cast(), size) };
     if n != size {
         return match io::Error::last_os_error().raw_os_error() {
             Some(libc::EPERM) | Some(libc::EACCES) => Lookup::Denied,
@@ -46,7 +45,10 @@ pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
             Lookup::Found(p) if p.pgid == pgid => out.push(p),
             Lookup::Found(_) | Lookup::Gone => {}
             Lookup::Denied => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("pid {pid}")));
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("pid {pid}"),
+                ));
             }
         }
     }

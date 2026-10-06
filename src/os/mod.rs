@@ -48,7 +48,10 @@ pub fn proc_info(pid: i32) -> Lookup<ProcInfo> {
 /// The live (not zombie) members of a process group. An error means the answer is not
 /// known, which is never taken as "empty".
 pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
-    Ok(sys::group_members(pgid)?.into_iter().filter(|p| !p.zombie).collect())
+    Ok(sys::group_members(pgid)?
+        .into_iter()
+        .filter(|p| !p.zombie)
+        .collect())
 }
 
 /// Runs a helper (`ps`, `lsof`) with a time limit and returns its stdout, whatever its
@@ -56,7 +59,11 @@ pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
 fn run_helper(cmd: &mut std::process::Command, limit: Duration) -> io::Result<Vec<u8>> {
     use std::io::Read;
     use std::process::Stdio;
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
     let mut stdout = child.stdout.take().expect("piped");
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -71,7 +78,10 @@ fn run_helper(cmd: &mut std::process::Command, limit: Duration) -> io::Result<Ve
         if Instant::now() >= end {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "helper did not finish in time"));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "helper did not finish in time",
+            ));
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -80,8 +90,14 @@ fn run_helper(cmd: &mut std::process::Command, limit: Duration) -> io::Result<Ve
 pub fn myself() -> ProcRef {
     let pid = std::process::id() as i32;
     match proc_info(pid) {
-        Lookup::Found(p) => ProcRef { pid, started: p.started },
-        _ => ProcRef { pid, started: StartTime(String::new()) },
+        Lookup::Found(p) => ProcRef {
+            pid,
+            started: p.started,
+        },
+        _ => ProcRef {
+            pid,
+            started: StartTime(String::new()),
+        },
     }
 }
 
@@ -106,7 +122,9 @@ pub struct Child {
 
 impl Child {
     pub fn adopt(child: std::process::Child) -> Child {
-        Child { pid: child.id() as i32 }
+        Child {
+            pid: child.id() as i32,
+        }
     }
 
     pub fn pid(&self) -> i32 {
@@ -127,7 +145,10 @@ impl Child {
     /// The child's process group. Borrowing the child keeps the proof alive: once the
     /// child is reaped (`reap` takes it by value) no `OwnedGroup` of it can exist.
     pub fn group(&self) -> OwnedGroup<'_> {
-        OwnedGroup { pgid: self.pid, _owner: PhantomData }
+        OwnedGroup {
+            pgid: self.pid,
+            _owner: PhantomData,
+        }
     }
 
     /// Empties the child's group, and makes sure the child itself has exited, so that
@@ -192,8 +213,13 @@ pub struct OwnedGroup<'a> {
 impl OwnedGroup<'static> {
     pub fn verify(leader: &ProcRef) -> Lookup<OwnedGroup<'static>> {
         match proc_info(leader.pid) {
-            Lookup::Found(p) if !p.zombie && p.pgid == leader.pid && p.started == leader.started => {
-                Lookup::Found(OwnedGroup { pgid: leader.pid, _owner: PhantomData })
+            Lookup::Found(p)
+                if !p.zombie && p.pgid == leader.pid && p.started == leader.started =>
+            {
+                Lookup::Found(OwnedGroup {
+                    pgid: leader.pid,
+                    _owner: PhantomData,
+                })
             }
             Lookup::Found(_) | Lookup::Gone => Lookup::Gone,
             Lookup::Denied => Lookup::Denied,
@@ -212,7 +238,9 @@ impl OwnedGroup<'_> {
 
     /// Live members, or `None` when they cannot be read.
     pub fn members(&self) -> Option<Vec<i32>> {
-        group_members(self.pgid).ok().map(|v| v.into_iter().map(|p| p.pid).collect())
+        group_members(self.pgid)
+            .ok()
+            .map(|v| v.into_iter().map(|p| p.pid).collect())
     }
 
     /// TERM, wait up to `grace` for the group to empty, KILL, wait up to 2 s. TERM is
@@ -227,7 +255,11 @@ impl OwnedGroup<'_> {
         let empty = self.wait_empty(Duration::from_secs(2));
         Terminated {
             forced: true,
-            survivors: if empty { vec![] } else { self.members().unwrap_or_default() },
+            survivors: if empty {
+                vec![]
+            } else {
+                self.members().unwrap_or_default()
+            },
         }
     }
 
@@ -251,7 +283,11 @@ mod tests {
     use std::os::unix::process::CommandExt;
 
     fn spawn_tree(script: &str) -> Child {
-        let c = std::process::Command::new("sh").args(["-c", script]).process_group(0).spawn().unwrap();
+        let c = std::process::Command::new("sh")
+            .args(["-c", script])
+            .process_group(0)
+            .spawn()
+            .unwrap();
         Child::adopt(c)
     }
 
@@ -295,7 +331,10 @@ mod tests {
         }
         assert!(child.exited());
         // macOS answers Gone for a zombie, Linux Found with the zombie mark.
-        assert!(!matches!(proc_info(child.pid()), Lookup::Found(p) if !p.zombie), "not alive");
+        assert!(
+            !matches!(proc_info(child.pid()), Lookup::Found(p) if !p.zombie),
+            "not alive"
+        );
         assert!(child.exited(), "WNOWAIT leaves it for later");
         assert_eq!(child.reap(), ExitStatus::Code(3));
     }
@@ -307,9 +346,15 @@ mod tests {
             Lookup::Found(p) => p,
             other => panic!("{other:?}"),
         };
-        let wrong = ProcRef { pid: child.pid(), started: StartTime("1.000000".into()) };
+        let wrong = ProcRef {
+            pid: child.pid(),
+            started: StartTime("1.000000".into()),
+        };
         assert!(matches!(OwnedGroup::verify(&wrong), Lookup::Gone));
-        let right = ProcRef { pid: child.pid(), started: info.started };
+        let right = ProcRef {
+            pid: child.pid(),
+            started: info.started,
+        };
         assert!(matches!(OwnedGroup::verify(&right), Lookup::Found(_)));
         child.terminate_group(Duration::from_secs(2));
         child.reap();

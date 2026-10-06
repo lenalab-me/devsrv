@@ -11,7 +11,9 @@ pub fn siginfo_pid(info: &libc::siginfo_t) -> i32 {
 }
 
 fn boot_id() -> String {
-    fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Fields of `/proc/<pid>/stat` after the command name, which may hold spaces and `)`.
@@ -64,7 +66,12 @@ pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
 
 pub fn command_line(pid: i32) -> Option<String> {
     let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let s = raw.split(|&b| b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a)).collect::<Vec<_>>().join(" ");
+    let s = raw
+        .split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a))
+        .collect::<Vec<_>>()
+        .join(" ");
     (!s.is_empty()).then_some(s)
 }
 
@@ -72,12 +79,16 @@ pub fn command_line(pid: i32) -> Option<String> {
 fn listening_inodes(port: u16) -> io::Result<HashSet<u64>> {
     let mut inodes = HashSet::new();
     for file in ["/proc/net/tcp", "/proc/net/tcp6"] {
-        let Ok(text) = fs::read_to_string(file) else { continue };
+        let Ok(text) = fs::read_to_string(file) else {
+            continue;
+        };
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split_whitespace().collect();
             // local_address is HEXADDR:HEXPORT; state 0A is LISTEN.
             let Some(local) = f.get(1) else { continue };
-            let Some((_, p)) = local.rsplit_once(':') else { continue };
+            let Some((_, p)) = local.rsplit_once(':') else {
+                continue;
+            };
             if u16::from_str_radix(p, 16).ok() == Some(port)
                 && f.get(3) == Some(&"0A")
                 && let Some(inode) = f.get(9).and_then(|s| s.parse().ok())
@@ -96,18 +107,30 @@ pub fn tcp_listeners(port: u16) -> io::Result<Vec<i32>> {
     }
     let mut pids = Vec::new();
     for pid in all_pids()? {
-        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
-        let owns = fds.filter_map(|e| fs::read_link(e.ok()?.path()).ok()).any(|link| {
-            link.to_str()
-                .and_then(|s| s.strip_prefix("socket:[")?.strip_suffix(']')?.parse::<u64>().ok())
-                .is_some_and(|i| inodes.contains(&i))
-        });
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        let owns = fds
+            .filter_map(|e| fs::read_link(e.ok()?.path()).ok())
+            .any(|link| {
+                link.to_str()
+                    .and_then(|s| {
+                        s.strip_prefix("socket:[")?
+                            .strip_suffix(']')?
+                            .parse::<u64>()
+                            .ok()
+                    })
+                    .is_some_and(|i| inodes.contains(&i))
+            });
         if owns {
             pids.push(pid);
         }
     }
     if pids.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the listener's owner is not visible"));
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the listener's owner is not visible",
+        ));
     }
     Ok(pids)
 }
