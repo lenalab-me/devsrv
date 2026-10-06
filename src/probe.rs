@@ -117,8 +117,26 @@ fn url_host(addr: &SocketAddr, host: &Option<String>) -> String {
     match (host, addr.ip()) {
         (Some(h), _) => h.clone(),
         (None, IpAddr::V4(ip)) => ip.to_string(),
-        (None, IpAddr::V6(_)) => "localhost".to_string(),
+        (None, IpAddr::V6(ip)) => format!("[{ip}]"),
     }
+}
+
+/// The first address that answers, in order. When a later one answers (::1 after
+/// 127.0.0.1 did not), the first is tried once more: a server that was still binding
+/// both would otherwise get a different URL from run to run.
+fn first_answer<T>(
+    addrs: &[SocketAddr],
+    try_one: impl Fn(&SocketAddr) -> Result<(String, T), String>,
+) -> Result<(String, T), String> {
+    let mut seen = String::from("no address");
+    for (i, addr) in addrs.iter().enumerate() {
+        match try_one(addr) {
+            Ok(found) if i > 0 => return Ok(try_one(&addrs[0]).unwrap_or(found)),
+            Ok(found) => return Ok(found),
+            Err(e) => seen = e,
+        }
+    }
+    Err(seen)
 }
 
 /// One HTTP/1.0 GET; the status code, or what went wrong.
@@ -172,37 +190,28 @@ fn http_status(
 fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
     match cond {
         Condition::Http { host, port, path } => {
-            let mut seen = String::from("no address");
-            for addr in addrs(host, *port) {
-                let h = url_host(&addr, host);
-                match http_status(&addr, &h, path, deadline) {
-                    Ok(code) if (200..500).contains(&code) => {
-                        return Ok(Met {
-                            what: format!("http://{h}:{port}{path} (HTTP {code})"),
-                            host: Some(h),
-                        });
-                    }
-                    Ok(code) => seen = format!("HTTP {code}"),
-                    Err(e) => seen = e,
+            let try_one = |addr: &SocketAddr| {
+                let h = url_host(addr, host);
+                match http_status(addr, &h, path, deadline) {
+                    Ok(code) if (200..500).contains(&code) => Ok((h, code)),
+                    Ok(code) => Err(format!("HTTP {code}")),
+                    Err(e) => Err(e),
                 }
-            }
-            Err(seen)
+            };
+            let (h, code) = first_answer(&addrs(host, *port), try_one)?;
+            Ok(Met {
+                what: format!("http://{h}:{port}{path} (HTTP {code})"),
+                host: Some(h),
+            })
         }
         Condition::Port { host, port } => {
-            let mut seen = String::from("no address");
-            for addr in addrs(host, *port) {
-                match connect(&addr, deadline) {
-                    Ok(_) => {
-                        let h = url_host(&addr, host);
-                        return Ok(Met {
-                            what: format!("{h}:{port}"),
-                            host: Some(h),
-                        });
-                    }
-                    Err(e) => seen = e,
-                }
-            }
-            Err(seen)
+            let try_one =
+                |addr: &SocketAddr| connect(addr, deadline).map(|_| (url_host(addr, host), ()));
+            let (h, ()) = first_answer(&addrs(host, *port), try_one)?;
+            Ok(Met {
+                what: format!("{h}:{port}"),
+                host: Some(h),
+            })
         }
         Condition::Log { path, pattern } => match find_line(path, pattern) {
             Some(line) => Ok(Met::new(line)),

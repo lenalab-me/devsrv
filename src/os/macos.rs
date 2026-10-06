@@ -32,11 +32,15 @@ pub fn proc_info(pid: i32) -> Lookup<ProcInfo> {
 pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
     let mut buf = vec![0 as libc::pid_t; 4096];
     let bytes = (buf.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
-    // SAFETY: the buffer is `bytes` long. libproc returns the number of pids here
-    // (proc_listpids returns bytes; proc_listpgrppids divides).
+    // libproc returns the number of pids here (proc_listpids returns bytes;
+    // proc_listpgrppids divides), and 0 both for an empty group and for a failure,
+    // which only errno tells apart.
+    // SAFETY: errno is thread-local; the buffer is `bytes` long.
+    unsafe { *libc::__error() = 0 };
     let n = unsafe { libc::proc_listpgrppids(pgid, buf.as_mut_ptr().cast(), bytes) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
+    let err = io::Error::last_os_error();
+    if n < 0 || (n == 0 && err.raw_os_error().is_some_and(|e| e != 0)) {
+        return Err(err);
     }
     let count = (n as usize).min(buf.len());
     let mut out = Vec::new();

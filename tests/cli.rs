@@ -62,6 +62,7 @@ impl Env {
         serde_json::from_str(&self.run(&a).stdout).unwrap()
     }
 
+    /// The `ls --json` entry of a name, or null when there is none (yet).
     fn process(&self, name: &str) -> Value {
         let ls = self.json(&["ls"]);
         ls["processes"]
@@ -70,7 +71,7 @@ impl Env {
             .iter()
             .find(|p| p["name"] == name)
             .cloned()
-            .unwrap()
+            .unwrap_or(Value::Null)
     }
 
     fn record_path(&self, name: &str) -> PathBuf {
@@ -802,4 +803,114 @@ fn an_orphan_that_still_runs_is_shown_as_alive_and_as_devsrvs() {
     let r = env.run(&["stop", "web"]);
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert_eq!(http_get(url.trim()), None, "stopped");
+}
+
+#[test]
+fn of_concurrent_starts_of_one_name_exactly_one_wins() {
+    let env = Env::new();
+    let runs: Vec<_> = (0..5)
+        .map(|_| devsrv_child(&env, &["start", "x", "--", "sleep", "377"]))
+        .collect();
+    let codes: Vec<i32> = runs
+        .into_iter()
+        .map(|c| c.wait_with_output().unwrap().status.code().unwrap())
+        .collect();
+    assert_eq!(codes.iter().filter(|&&c| c == 0).count(), 1, "{codes:?}");
+    assert!(codes.iter().all(|&c| c == 0 || c == 1), "{codes:?}");
+    let out = Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .unwrap();
+    let sleeps = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.trim() == "sleep 377")
+        .count();
+    assert_eq!(sleeps, 1, "the losers started nothing");
+    assert_eq!(env.process("x")["state"], "ready");
+}
+
+#[test]
+fn a_start_killed_midway_still_ends_ready_or_stopped() {
+    let env = Env::new();
+    let mut start = devsrv_child(
+        &env,
+        &[
+            "start",
+            "slow",
+            "--ready",
+            "log:up",
+            "--",
+            "sh",
+            "-c",
+            "sleep 0.5; echo up; sleep 300",
+        ],
+    );
+    // Killed once its supervisor runs (the first record is there), before it is ready.
+    assert!(eventually(Duration::from_secs(5), || env.process("slow")["state"] == "starting"));
+    start.kill().unwrap();
+    start.wait().unwrap();
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("slow")["state"] == "ready"
+    ));
+    assert_eq!(env.run(&["stop", "slow"]).code, 0);
+}
+
+#[test]
+fn what_a_dead_leader_left_in_an_orphan_group_is_named_not_signalled() {
+    let env = Env::new();
+    assert_eq!(
+        env.run(&["start", "tree", "--", "sh", "-c", "sleep 300 & sleep 300"])
+            .code,
+        0
+    );
+    let rec = record_of(&env, "tree");
+    let sup = rec["state"]["up"]["supervisor"]["pid"].as_i64().unwrap();
+    let pgid = rec["state"]["up"]["child"]["pid"].as_i64().unwrap();
+    signal("-KILL", sup);
+    signal("-KILL", pgid);
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("tree")["alive"] == false
+    ));
+    let r = env.run(&["stop", "tree"]);
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert!(
+        r.stderr.contains("devsrv cannot prove they are its own"),
+        "{}",
+        r.stderr
+    );
+    assert!(group_alive(pgid), "nothing was sent");
+    Command::new("kill")
+        .args(["-KILL", &format!("-{pgid}")])
+        .status()
+        .unwrap();
+    assert!(eventually(Duration::from_secs(5), || !group_alive(pgid)));
+}
+
+#[test]
+fn a_server_on_ipv6_only_gets_the_address_that_answered() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "v6",
+        "--port",
+        "auto",
+        "--",
+        "python3",
+        "-m",
+        "http.server",
+        "--bind",
+        "::1",
+        "{port}",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let url = r.stdout.trim();
+    assert!(url.starts_with("http://[::1]:"), "{url}");
+    let port = url.trim_end_matches('/').rsplit(':').next().unwrap();
+    let mut s = TcpStream::connect(format!("[::1]:{port}")).unwrap();
+    s.write_all(b"GET / HTTP/1.0\r\n\r\n").unwrap();
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).unwrap();
+    assert!(buf.starts_with("HTTP/1.0 200"), "{buf}");
 }

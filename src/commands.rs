@@ -2,10 +2,7 @@
 //! start, and leaves stop requests; the supervisor does the rest.
 
 use std::fs::{self, File};
-use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -103,8 +100,9 @@ fn view(inst: &Instance, record: &Record, status: Status) -> Value {
         State::Down { ended, end } => {
             v["ended_s_ago"] = json!(ended.elapsed().as_secs_f64());
             v["end"] = serde_json::to_value(end).unwrap_or(Value::Null);
+            // Not "pid": a dead record has nothing to signal.
             if let End::Exited { pid, .. } = end {
-                v["pid"] = json!(pid);
+                v["last_pid"] = json!(pid);
             }
         }
     }
@@ -117,7 +115,28 @@ fn already_started(inst: &Instance) -> Failure {
     match inst.status() {
         Ok(Some((record, status))) => {
             let age = human(record.spec.created.elapsed());
-            let (msg, pid) = match &record.state {
+            let busy = format!("{name} is being started or stopped by another devsrv");
+            let (msg, hint) = match &record.state {
+                State::Up { child, .. }
+                    if fs::read_to_string(inst.stop_path())
+                        .is_ok_and(|t| t.trim() == child.token().trim()) =>
+                {
+                    (
+                        format!("{name} is being stopped (pid {})", child.pid),
+                        format!(
+                            "wait for it, then start again: devsrv wait gone {}",
+                            child.pid
+                        ),
+                    )
+                }
+                State::Up {
+                    child,
+                    ready: Some(r),
+                    ..
+                } if r.address.starts_with("pid ") => (
+                    format!("{name} is already started (pid {}, up {age})", child.pid),
+                    hint,
+                ),
                 State::Up {
                     child,
                     ready: Some(r),
@@ -127,15 +146,14 @@ fn already_started(inst: &Instance) -> Failure {
                         "{name} is already started: {} (pid {}, up {age})",
                         r.address, child.pid
                     ),
-                    child.pid,
+                    hint,
                 ),
                 State::Up { child, .. } => (
                     format!("{name} is already starting (pid {}, for {age})", child.pid),
-                    child.pid,
+                    hint,
                 ),
-                State::Down { .. } => (format!("{name} is being started by another devsrv"), 0),
+                State::Down { .. } => (busy, "try again in a moment".into()),
             };
-            let _ = pid;
             Failure::new(NOT_MET, "already_started", msg)
                 .hint(hint)
                 .data(view(inst, &record, status))
@@ -145,7 +163,7 @@ fn already_started(inst: &Instance) -> Failure {
             "already_started",
             format!("{name} is being started by another devsrv"),
         )
-        .hint(hint),
+        .hint("try again in a moment"),
         Err(e) => e,
     }
 }
@@ -208,7 +226,21 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
                     child.pid
                 )));
             }
-            Lookup::Gone => {}
+            Lookup::Gone => {
+                if matches!(os::proc_info(child.pid), Lookup::Gone)
+                    && os::group_members(child.pid).is_ok_and(|m| !m.is_empty())
+                {
+                    return Err(Failure::new(
+                        NOT_MET,
+                        "leftovers",
+                        format!(
+                            "the last run of {name} left processes in its process group (pgid {})",
+                            child.pid
+                        ),
+                    )
+                    .hint(format!("devsrv stop {name} names them; then start again")));
+                }
+            }
         }
     }
     let port = match args.port {
@@ -271,34 +303,8 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
         .map_err(|e| fail_io("clear the old record", e))?;
     let _ = fs::remove_file(inst.stop_path());
     File::create(inst.log_path()).map_err(|e| fail_io("create the log", e))?;
-    let sup_err = File::create(inst.supervisor_err_path())
-        .map_err(|e| fail_io("create supervisor.err", e))?;
-    let exe = std::env::current_exe().map_err(|e| fail_io("find the devsrv binary", e))?;
-    let lock_fd = claim.fd();
-    let mut cmd = Command::new(exe);
-    cmd.arg("__supervise")
-        .env(supervisor::LOCK_FD_ENV, lock_fd.to_string())
-        .env(supervisor::DIR_ENV, claim.dir())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(sup_err);
-    // SAFETY: only async-signal-safe calls between fork and exec.
-    unsafe {
-        cmd.pre_exec(move || {
-            libc::setsid();
-            libc::fcntl(lock_fd, libc::F_SETFD, 0);
-            Ok(())
-        });
-    }
-    let mut sup = cmd
-        .spawn()
-        .map_err(|e| fail_io("start the supervisor", e))?;
-    let spec_json = serde_json::to_vec(&spec).map_err(|e| Failure::system(e.to_string()))?;
-    if let Some(mut stdin) = sup.stdin.take() {
-        stdin
-            .write_all(&spec_json)
-            .map_err(|e| fail_io("hand the spec to the supervisor", e))?;
-    }
+    let mut sup =
+        supervisor::launch(&claim, &spec).map_err(|e| fail_io("start the supervisor", e))?;
     drop(claim);
     let started = Instant::now();
     let limit = args.timeout + Duration::from_secs(15);
@@ -716,7 +722,55 @@ fn stop_orphan(
             let t = group.terminate_verified(Duration::from_secs(5));
             (Cause::Stopped { forced: t.forced }, t)
         }
-        Lookup::Gone => (Cause::OnItsOwn, os::Terminated::default()),
+        Lookup::Gone => {
+            // The leader is gone. What is left in its group cannot be proved to be ours
+            // (the group id could have been reused), so it is named, not signalled. When
+            // the pid now belongs to another process, the old group was empty when it was
+            // reused (a pid is not handed out while a group of that id exists): nothing
+            // of ours is left to name.
+            let left: Vec<i32> = match (os::proc_info(child.pid), os::group_members(child.pid)) {
+                (Lookup::Gone, Ok(m)) => m.into_iter().map(|p| p.pid).collect(),
+                _ => vec![],
+            };
+            if !left.is_empty() {
+                let end = End::Exited {
+                    pid: child.pid,
+                    status: ExitStatus::Unknown,
+                    cause: Cause::OnItsOwn,
+                    survivors: left.clone(),
+                    unconfirmed: false,
+                };
+                let down = Record {
+                    v: record.v,
+                    spec: record.spec.clone(),
+                    state: State::Down {
+                        ended: UnixMs::now(),
+                        end,
+                    },
+                };
+                claim.write(&down).map_err(|e| {
+                    Failure::system(format!("cannot write the record of {name}: {e}"))
+                })?;
+                let mut f = Failure::new(
+                    NOT_MET,
+                    "survivors",
+                    format!(
+                        "{name}: its command (pid {}) is gone, but its process group still has processes; devsrv cannot prove they are its own, so it sent nothing",
+                        child.pid
+                    ),
+                );
+                for p in &left {
+                    f = f.detail(owner_text(*p));
+                }
+                return Err(f
+                    .hint(format!(
+                        "if these are what {name} left behind: kill -TERM -{}",
+                        child.pid
+                    ))
+                    .data(json!({ "name": name.as_str(), "pgid": child.pid, "survivors": left })));
+            }
+            (Cause::OnItsOwn, os::Terminated::default())
+        }
         Lookup::Denied => {
             return Err(Failure::system(format!(
                 "cannot tell whether pid {} of {name} is still the process devsrv started; nothing was sent",
@@ -864,13 +918,18 @@ pub fn stop(names: Vec<Name>, all: bool) -> Result<Output, Failure> {
     let mut failed = failed.into_iter();
     match failed.next() {
         Some(mut worst) => {
-            for f in failed {
-                worst = worst.detail(format!("also: {}", f.message));
+            let failed: Vec<Value> = std::iter::once(&worst)
+                .chain(failed.as_slice())
+                .map(|f| json!({ "error": f.kind, "message": f.message }))
+                .collect();
+            for f in &failed[1..] {
+                worst = worst.detail(format!("also: {}", f["message"].as_str().unwrap_or("")));
             }
             for t in done {
                 worst = worst.detail(format!("also: {t}"));
             }
-            Err(worst)
+            let prev = std::mem::take(&mut worst.data);
+            Err(worst.data(merge(prev, json!({ "stopped": items, "failed": failed }))))
         }
         None => Ok(Output::new(
             done.iter().map(|t| format!("{t}\n")).collect::<String>(),

@@ -73,7 +73,13 @@ impl Store {
                 ))
                 .hint("set DEVSRV_STATE_DIR to another directory"));
             }
-            Err(_) => fs::write(&marker, &want).map_err(|e| unwritable(&dir, &e))?,
+            // Written whole (temp file, rename), so a concurrent call never reads it half done.
+            Err(_) => {
+                let tmp = dir.join(format!("root.{}.tmp", std::process::id()));
+                fs::write(&tmp, &want)
+                    .and_then(|_| fs::rename(&tmp, &marker))
+                    .map_err(|e| unwritable(&dir, &e))?
+            }
         }
         Ok(Project {
             dir,

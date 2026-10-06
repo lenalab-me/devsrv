@@ -55,7 +55,9 @@ pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
 }
 
 /// Runs a helper (`ps`, `lsof`) with a time limit and returns its stdout, whatever its
-/// exit status. An error when it cannot be run or does not finish in time.
+/// exit status. An error when it cannot be run or does not finish in time. (Its own
+/// `Child::kill` on a timeout targets this unreaped helper only.)
+#[cfg(target_os = "macos")]
 fn run_helper(cmd: &mut std::process::Command, limit: Duration) -> io::Result<Vec<u8>> {
     use std::io::Read;
     use std::process::Stdio;

@@ -1,14 +1,13 @@
 //! `devsrv __supervise`: the owner of one name for the life of one run.
 //!
 //! Started detached by `devsrv start`, holding the name's lock (inherited as
-//! `DEVSRV_LOCK_FD`), with the `Spec` on stdin. It spawns the command in its own process
+//! `DEVSRV_LOCK_FD`), with the `Spec` in `spec.json`. It spawns the command in its own process
 //! group, writes `Up`, waits for readiness, then watches for the command's exit and for
 //! a stop request. At the end it empties the group, reaps the command, writes `Down`,
 //! and exits, which releases the lock. It never touches the command's output: the
 //! command writes the log itself, so killing the supervisor leaves the command running.
 
 use std::fs::{self, OpenOptions};
-use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -23,8 +22,39 @@ use crate::os::{self, Child, Lookup};
 use crate::probe::{self, Condition, Outcome};
 use crate::store::Claim;
 
-pub const LOCK_FD_ENV: &str = "DEVSRV_LOCK_FD";
-pub const DIR_ENV: &str = "DEVSRV_INSTANCE_DIR";
+const LOCK_FD_ENV: &str = "DEVSRV_LOCK_FD";
+const DIR_ENV: &str = "DEVSRV_INSTANCE_DIR";
+const SPEC: &str = "spec.json";
+
+/// Starts the supervisor of `spec`, detached (its own session), handing it the name's
+/// lock. The spec is written before the supervisor starts, so a `devsrv start` killed
+/// right after this still leaves a supervisor that knows what to run.
+pub fn launch(claim: &Claim, spec: &Spec) -> std::io::Result<std::process::Child> {
+    let tmp = claim.dir().join("spec.json.tmp");
+    fs::write(
+        &tmp,
+        serde_json::to_vec(spec).map_err(std::io::Error::other)?,
+    )?;
+    fs::rename(&tmp, claim.dir().join(SPEC))?;
+    let err = fs::File::create(claim.dir().join("supervisor.err"))?;
+    let lock_fd = claim.fd();
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.arg("__supervise")
+        .env(LOCK_FD_ENV, lock_fd.to_string())
+        .env(DIR_ENV, claim.dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(err);
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setsid();
+            libc::fcntl(lock_fd, libc::F_SETFD, 0);
+            Ok(())
+        });
+    }
+    cmd.spawn()
+}
 const GRACE: Duration = Duration::from_secs(5);
 
 enum Interrupt {
@@ -61,14 +91,19 @@ pub fn run() -> u8 {
         }
     };
     let dir = PathBuf::from(std::env::var_os(DIR_ENV).unwrap_or_default());
+    // SAFETY: plain syscalls. A caller that ignores SIGCHLD would make Linux reap the
+    // command on exit, and an unreaped child is what keeps its pgid from being reused.
+    unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
+    if unsafe { libc::fcntl(lock_fd, libc::F_GETFD) } == -1 {
+        eprintln!("devsrv: {LOCK_FD_ENV}={lock_fd} is not an open descriptor");
+        return 2;
+    }
     close_inherited(lock_fd);
     // SAFETY: devsrv start passed us this descriptor of the lock file, and only us.
     let claim = unsafe { Claim::inherit(lock_fd, dir) };
-    let mut input = String::new();
-    let spec: Spec = match std::io::stdin()
-        .read_to_string(&mut input)
+    let spec: Spec = match fs::read_to_string(claim.dir().join(SPEC))
         .map_err(|e| e.to_string())
-        .and_then(|_| serde_json::from_str(&input).map_err(|e| e.to_string()))
+        .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
     {
         Ok(s) => s,
         Err(e) => {
@@ -223,7 +258,7 @@ fn supervise(claim: &Claim, spec: &Spec) -> Result<(), String> {
     let interrupted = || {
         if child.exited() {
             Some(Interrupt::Exited)
-        } else if fs::read_to_string(&stop).is_ok_and(|t| t.trim() == token) {
+        } else if fs::read_to_string(&stop).is_ok_and(|t| t.trim() == token.trim()) {
             Some(Interrupt::Stop)
         } else {
             None
