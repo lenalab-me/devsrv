@@ -1,0 +1,54 @@
+devsrv - start, wait for, inspect and stop dev servers, for coding agents
+
+Usage:
+  devsrv start NAME [--port auto|N] [--ready http[:PATH]|port|log:REGEX|none]
+               [--timeout 30s] -- CMD ARGS...
+  devsrv ls [--all]                  what devsrv started here: name, state, pid, port, age
+  devsrv logs NAME [-n 50] [--follow-until REGEX [--timeout 30s]]
+  devsrv stop NAME... | --all        stops only the process groups devsrv started
+  devsrv who PORT                    who listens on PORT (never stops it)
+  devsrv wait URL | port N | file PATH | log NAME REGEX | gone PID  [--timeout 30s]
+
+Examples:
+  devsrv start web --port auto -- python3 -m http.server {port}
+  devsrv start ui --port auto -- npx vite --strictPort --port {port}
+  devsrv start api --port 8080 --ready http:/health -- cargo run
+  devsrv start worker --ready 'log:listening' -- node worker.js
+  devsrv logs web -n 20;  devsrv stop web;  devsrv wait http://127.0.0.1:8080/
+
+start runs CMD in the background (no shell; `-- sh -c '...'` for one) and returns when
+it is ready. {port} in ARGS becomes the port, also given as $PORT (do not write $PORT
+yourself: your shell would expand it first). --ready defaults to http with a port, else
+none (still running after 0.5s). http is ready on a status from 200 to 499.
+A name runs once per git top level (or directory): a second start fails until stop.
+The command keeps running after start returns; its stdout and stderr go to the log.
+
+Output: the first line is the result. start prints only the address on stdout
+(http://127.0.0.1:PORT/, or 127.0.0.1:PORT, or pid N); notes go to stderr. A failure
+says what happened on the first line of stderr, then the log tail, then `hint:` lines
+with the command to run next. --json (anywhere) prints one JSON object on stdout.
+
+Exit status: 0 ok; 1 the condition did not hold (exited, not ready in time, already
+started, unknown name, port in use, who: port free); 2 invalid input, or CMD cannot be
+run; 3 devsrv could not work (state directory, broken record, the OS did not answer).
+
+Details
+-------
+State lives in $DEVSRV_STATE_DIR, else $XDG_STATE_HOME/devsrv, else
+~/.local/state/devsrv. If it is not writable (a sandbox), start fails before running
+anything; set DEVSRV_STATE_DIR to a writable directory and keep it for later calls.
+
+Each start leaves one small supervisor process (devsrv __supervise) that records the
+exit status and does the stopping. stop sends TERM to the command's process group,
+waits up to 5s, then KILL. A child that leaves the group (setsid, daemonizing) is not
+followed. When the command exits on its own, what is left of its group is stopped too,
+so do not background the server inside CMD (`sh -c 'server &'`).
+
+--port auto picks a free port on 127.0.0.1. A fixed --port that is already in use
+fails with its owner. Before saying ready, devsrv checks that the port is held by the
+command's process group, not by someone else.
+
+Options also take the form --opt=value. --timeout takes 30, 30s, 500ms or 2m. A
+single quoted CMD with spaces ("npm run dev") is run with sh -c.
+wait also takes --port N, --file PATH, --log NAME REGEX, --gone PID and a bare port.
+logs --follow-until matches lines from the start of the current run's log.

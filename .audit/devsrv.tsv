@@ -8,3 +8,8 @@ ts	phase	decision	why	evidence	result
 2026-10-06T17:45:47Z	design	採点役（GPT-6.1-Sol）は B を推し、自分は A を推した。食い違いを読み直し、土台は A にした	B の決め手『見張り役が死んだら止めない』はエージェントを kill/pkill に戻す。A の弱点 2 つ（型の縛り、破損の伝達）は形を変えずに直せる	docs/design.md「まとめの判断」	A を土台
 2026-10-06T17:45:47Z	design	B と C から移した: bind(0)、準備の持ち主確認、HTTP 200〜499、書けなければ 3、未登録 stop は 1、stop ファイルに実行 ID	採点役の指摘のうち当たっていたもの	docs/design.md	open
 2026-10-06T17:45:47Z	design	B のソケットと C の SIGUSR1 は移さなかった	ソケットはパス長とサンドボックスに当たり手順が増える。SIGUSR1 は見張り役の PID の使い回しを戻す	docs/design.md	見送り
+2026-10-06T17:59:05Z	impl	start/stop/ls/logs/who/wait を設計どおりに実装し、手で一通り動かした	危ないところ（見張り役、グループ、起動時刻）から順に	src/, 一時の DEVSRV_STATE_DIR での手の確かめ	起動・二重起動・即死・who・wait は期待どおり
+2026-10-06T17:59:05Z	impl	stop が効かない不具合を見つけた: proc_listpgrppids は PID の数を返すのに 4 で割り、グループが空に見えて TERM を送らず回収で待ち続けた	観測の方法を疑った。sample で見張り役が waitpid で止まっているのを確かめた	src/os/macos.rs group_members	直した
+2026-10-06T17:59:05Z	impl	守りを 2 つ足した: 一覧が空でも TERM は送る。回収の前に先頭が終わったかを確かめ、だめなら KILL	一覧の読み違いが止め損ないや永久の待ちにつながらないように	src/os/mod.rs terminate, terminate_group	本物のプロセスの単体テスト 4 件が通る
+2026-10-06T17:59:05Z	impl	macOS では proc_pidinfo がゾンビに Gone を返すと分かった（Linux は Z の印）	テストの思い込みを実測で直した。どちらも生きていないとして扱うので設計は変わらない	src/os/mod.rs tests	ok
+2026-10-06T17:59:05Z	impl	見張り役がいないときの stop を実地で確かめた: 古い見張り役を PID で止め、stop --all が孫まで止めた	orphan の道は A を土台に選んだ理由そのもの	この thread の stop --all の出力	all gone
