@@ -6,3 +6,7 @@ rust-version = "1.88"
 description = "Start, wait for, inspect and stop dev servers for coding agents"
 
 [dependencies]
+libc = "0.2.190"
+regex-lite = "0.1.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

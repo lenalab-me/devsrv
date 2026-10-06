@@ -2,3 +2,9 @@ ts	phase	decision	why	evidence	result
 2026-10-06T17:06:37Z	frame	完了の条件を 12 個、本物のプロセスで確かめる形で書いた	止めてはいけないものを止めるのは取り返しがつかないので、結合テストを関門にする	docs/plan.md	open
 2026-10-06T17:06:37Z	frame	基準を取り直した: sleep 702、待ちループ 189、lsof 99、pkill 65、kill 76	入れたあとに --since で比べるため	~/project/prod/devsrv-notes/baseline-2026-10-07.txt	Bash 7915 回
 2026-10-06T17:06:37Z	frame	厳しさは高め。architect の arena と interrogate を両方かける	プロセスを止める操作は一方通行で、PID の使い回しなど落とし穴が多い	docs/plan.md	open
+2026-10-06T17:07:56Z	frame	Claude Code の Bash ツールは、コマンドが終わっても裏のプロセスを片付けないと確かめた（setsid の有無によらず残る）	設計の問い 10 の前提を実験で決めるため	この thread の ps の出力（PPID 1 で両方生存）	片付けない
+2026-10-06T17:07:56Z	design	architect の arena を 3 モデルで始めた（Fable 5.1、GPT-6.1-Sol、Grok 4.7）	p3-models.md の architect runners の行のとおり。型と構成は一方通行の判断なので 2 案以上を比べる	/tmp/arena-devsrv/brief.md	open
+2026-10-06T17:45:47Z	design	3 案が届いた。3 つとも名前ごとの見張り役・flock・起動時刻・libc のみに収束	強い一致なので骨格はそのまま採る	/tmp/arena-devsrv/candidate-{a,b,c}/design.md	収束
+2026-10-06T17:45:47Z	design	採点役（GPT-6.1-Sol）は B を推し、自分は A を推した。食い違いを読み直し、土台は A にした	B の決め手『見張り役が死んだら止めない』はエージェントを kill/pkill に戻す。A の弱点 2 つ（型の縛り、破損の伝達）は形を変えずに直せる	docs/design.md「まとめの判断」	A を土台
+2026-10-06T17:45:47Z	design	B と C から移した: bind(0)、準備の持ち主確認、HTTP 200〜499、書けなければ 3、未登録 stop は 1、stop ファイルに実行 ID	採点役の指摘のうち当たっていたもの	docs/design.md	open
+2026-10-06T17:45:47Z	design	B のソケットと C の SIGUSR1 は移さなかった	ソケットはパス長とサンドボックスに当たり手順が増える。SIGUSR1 は見張り役の PID の使い回しを戻す	docs/design.md	見送り
