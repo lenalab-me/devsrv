@@ -14,7 +14,7 @@
 
 ## 次にやること
 
-1. GitHub の private リポジトリ（`lenalab-me/devsrv` を想定）を作って push する。まだ作っていない（外に出す操作なので、ユーザーに確かめてから）。
+1. GitHub の private リポジトリは https://github.com/lenalab-me/devsrv （2026-10-07 に作って push した）。CI は手動だけで、まだ回していない（private の macOS runner は分数が 10 倍に数えられるため。要るときは `gh workflow run test.yml`）。
 2. 対象は macOS だけ（2026-10-07、ユーザーと決めた。このマシンでしか使わない）。`src/os/linux.rs` は残してあるが、一度もビルドしていない。Linux が要るようになったら、CI の matrix に ubuntu を戻して確かめる。
 3. 数日たったら `tools/baseline.py --since 2026-10-06T23:57Z` で前後を比べる。devsrv が使われているか（`devsrv` の行）、sleep・lsof・pkill が減ったか。
 4. 指示なしの試用とベンチ（rpatch の `tools/bench/` の形）。まだ作っていない。
