@@ -9,14 +9,14 @@
 - **確かめ.** `cargo test` に、本物のプロセスを使う結合テスト 29 件と単体テスト 14 件。完了の条件 12 個（`c01`〜`c12`）と、レビューで再現された不具合の回帰テスト。10 回続けて回して全部通る。直す前のコミットで落ちることも確かめた。わざと壊したとき（起動時刻の照合を外す、TERM を送らない）に落ちることも確かめた。
 - **レビュー.** interrogate を 3 モデル（GPT-6.1-Sol、Grok 4.7、Fable 5.1）で 1 回かけ、critical と warning をほぼ全部直した。見送ったものは `.audit/devsrv.tsv` の review の行。
 - **検証のスキル.** `.agents/skills/verify-devsrv/`（doctor・drive・cleanup と、機能ごとの地図）。1 回通した証拠は `target/verify-devsrv/`（git の外）。
-- **案内.** `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.cursor/rules/global.mdc` の「CLI tools」に 1 行（Background processes: …）を **2026-10-06T23:57Z（日本時間 10/7 08:57）** に足した。比べるときは `python3 tools/baseline.py --since 2026-10-06T23:57`。足す前の基準は `~/project/prod/devsrv-notes/baseline-2026-10-07.txt`（14 日、Bash 7,915 回、sleep 702、待ちループ 189、lsof 99、pkill 65、kill 76）。
+- **案内.** `~/.claude/CLAUDE.md`、`~/.codex/AGENTS.md`、`~/.cursor/rules/global.mdc` の「CLI tools」に 1 行（Background processes: …）を **2026-10-06T23:57Z（日本時間 10/7 08:57）** に足した。比べるときは `python3 tools/baseline.py --since 2026-10-06T23:57Z`（末尾の `Z` を落とすと日本時間として読まれ、9 時間ずれる）。足す前の基準は `~/project/prod/devsrv-notes/baseline-2026-10-07.txt`（14 日、Bash 7,916 回、sleep 703、待ちループ 189、lsof 99、pkill 66、kill 76）。`sleep_minutes` はコマンドに書かれた秒数の合計で、実際に待った時間ではない。
 - **規模.** Rust で約 4,100 行（本体 3,300、うち単体テストを含む。結合テスト 850）。見込みの 1,500〜2,500 行を超えた。超えた分の多くは、レビューで足した「見えないときは見えないと言う」扱いと、その回帰テスト。
 
 ## 次にやること
 
 1. GitHub の private リポジトリ（`lenalab-me/devsrv` を想定）を作って push する。まだ作っていない（外に出す操作なので、ユーザーに確かめてから）。
 2. Linux で一度も動かしていない。リポジトリができたら `gh workflow run test.yml`（macOS と ubuntu）を回す。Linux の `/proc` まわり（`src/os/linux.rs`）は単体テストの parser 以外、未確認。
-3. 数日たったら `tools/baseline.py --since 2026-10-06T23:57` で前後を比べる。devsrv が使われているか（`devsrv` の行）、sleep・lsof・pkill が減ったか。
+3. 数日たったら `tools/baseline.py --since 2026-10-06T23:57Z` で前後を比べる。devsrv が使われているか（`devsrv` の行）、sleep・lsof・pkill が減ったか。
 4. 指示なしの試用とベンチ（rpatch の `tools/bench/` の形）。まだ作っていない。
 5. 使われるようになったら、edit-guard のフックに「`pkill -f` や単独の `sleep` に devsrv を案内する」規則を足すのを考える（止めすぎない）。
 6. Codex のサンドボックスの中で動くか（状態ディレクトリ、libproc、lsof、ループバックの bind）。書けないときは終了 3 で `DEVSRV_STATE_DIR` を案内する作りにしてある。

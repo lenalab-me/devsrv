@@ -147,7 +147,9 @@ pub struct Spec {
     pub timeout_ms: u64,
     pub created: UnixMs,
     /// Which `devsrv start` this is: the starting call accepts only a record of its own
-    /// run, never the result of a later start of the same name.
+    /// run, never the result of a later start of the same name. (Absent in records of
+    /// devsrv before it existed.)
+    #[serde(default)]
     pub run: String,
 }
 

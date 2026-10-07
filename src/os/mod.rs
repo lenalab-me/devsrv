@@ -252,10 +252,16 @@ impl OwnedGroup<'_> {
     fn may_signal(&self) -> bool {
         match &self.leader {
             None => true,
-            Some(l) => {
-                matches!(leader_matches(l), Lookup::Found(()))
-                    || self.members().is_some_and(|m| !m.is_empty())
-            }
+            // The leader still matches; or it has exited, its pid is not in use (so
+            // the group id was not reused for a new group), and the group has members.
+            Some(l) => match leader_matches(l) {
+                Lookup::Found(()) => true,
+                Lookup::Gone => {
+                    matches!(proc_info(l.pid), Lookup::Gone)
+                        && self.members().is_some_and(|m| !m.is_empty())
+                }
+                Lookup::Denied => false,
+            },
         }
     }
 

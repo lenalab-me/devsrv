@@ -21,7 +21,11 @@ if [ -n "$(find "$repo/src" -newer "$bin" -type f | head -1)" ]; then
 fi
 for s in "$repo"/target/verify-devsrv/*/; do
 	[ -d "$s/state" ] || continue
-	alive=$(cd "$s/proj" && DEVSRV_STATE_DIR="$s/state" "$bin" --json ls | { grep -o '"alive":true' || true; } | wc -l | tr -d ' ')
+	if ! listing=$(cd "$s/proj" && DEVSRV_STATE_DIR="$s/state" "$bin" --json ls); then
+		echo "NOTE: session $(basename "$s"): devsrv ls failed: $listing"
+		continue
+	fi
+	alive=$(printf '%s' "$listing" | { grep -o '"alive":true' || true; } | wc -l | tr -d ' ')
 	if [ "$alive" != "0" ]; then
 		echo "NOTE: session $(basename "$s") still has $alive running (cleanup.sh $(basename "$s"))"
 	fi

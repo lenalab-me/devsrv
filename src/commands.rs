@@ -227,9 +227,16 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
                 )));
             }
             Lookup::Gone => {
-                if matches!(os::proc_info(child.pid), Lookup::Gone)
-                    && os::group_members(child.pid).is_ok_and(|m| !m.is_empty())
-                {
+                let left = match os::proc_info(child.pid) {
+                    Lookup::Gone => os::group_members(child.pid).map(|m| !m.is_empty()),
+                    _ => Ok(false),
+                };
+                let left = left.map_err(|e| {
+                    Failure::system(format!(
+                        "cannot read what is left of the last run of {name}: {e}"
+                    ))
+                })?;
+                if left {
                     return Err(Failure::new(
                         NOT_MET,
                         "leftovers",
@@ -728,8 +735,12 @@ fn stop_orphan(
             // the pid now belongs to another process, the old group was empty when it was
             // reused (a pid is not handed out while a group of that id exists): nothing
             // of ours is left to name.
-            let left: Vec<i32> = match (os::proc_info(child.pid), os::group_members(child.pid)) {
-                (Lookup::Gone, Ok(m)) => m.into_iter().map(|p| p.pid).collect(),
+            let left: Vec<i32> = match os::proc_info(child.pid) {
+                Lookup::Gone => os::group_members(child.pid)
+                    .map_err(|e| Failure::system(format!("cannot read what is left of {name}'s process group: {e}; nothing was sent")))?
+                    .into_iter()
+                    .map(|p| p.pid)
+                    .collect(),
                 _ => vec![],
             };
             if !left.is_empty() {

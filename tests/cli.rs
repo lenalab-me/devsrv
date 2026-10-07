@@ -846,7 +846,10 @@ fn a_start_killed_midway_still_ends_ready_or_stopped() {
         ],
     );
     // Killed once its supervisor runs (the first record is there), before it is ready.
-    assert!(eventually(Duration::from_secs(5), || env.process("slow")["state"] == "starting"));
+    assert!(eventually(
+        Duration::from_secs(5),
+        || env.process("slow")["state"] == "starting"
+    ));
     start.kill().unwrap();
     start.wait().unwrap();
     assert!(eventually(
@@ -913,4 +916,17 @@ fn a_server_on_ipv6_only_gets_the_address_that_answered() {
     let mut buf = String::new();
     s.read_to_string(&mut buf).unwrap();
     assert!(buf.starts_with("HTTP/1.0 200"), "{buf}");
+}
+
+#[test]
+fn a_record_from_before_run_ids_still_reads() {
+    let env = Env::new();
+    env.run(&["start", "old", "--", "sh", "-c", "exit 0"]);
+    let path = env.record_path("old");
+    let mut rec = record_of(&env, "old");
+    rec["spec"].as_object_mut().unwrap().remove("run");
+    std::fs::write(&path, rec.to_string()).unwrap();
+    let r = env.run(&["ls"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("old"), "{}", r.stdout);
 }
