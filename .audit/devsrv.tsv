@@ -38,3 +38,4 @@ ts	phase	decision	why	evidence	result
 2026-10-07T00:03:36Z	test	（訂正）23:56 の『10 回とも通る』は出力の文字列で数えていた。終了コードで数え直し、10 回とも 0 だった	ビルドの失敗や時間切れも成功に数えてしまう数え方だった	/tmp/devsrv-testrun.log（最後の回）	10/10
 2026-10-07T00:03:36Z	impl	記録に足した run の欄を、欠けていてもよい形にした。前の版の記録が『壊れた記録』と読まれ、doctor が黙って終了 3 で止まった	検証のスキルを最終版で通そうとして見つけた。版を上げたときに、ユーザーの状態ディレクトリでも同じことが起きる	src/model.rs Spec.run, tests/cli.rs a_record_from_before_run_ids_still_reads	直した
 2026-10-07T00:03:36Z	verify	最終版で検証のスキルを通した: start、ps でグループに 3 つ、stop（TERM）、ps でグループは空	見直しの指摘 5（最終版での証拠がない、ps で確かめていない）への対応	target/verify-devsrv/final-stop-group-1791331399/	通った
+2026-10-07T00:27:05Z	finish	対象を macOS だけにした。CI の matrix から ubuntu を外し、linux.rs は残す	ユーザーの決定: このマシンでしか使わない	ユーザーの返答（この thread）	決定

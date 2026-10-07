@@ -15,7 +15,7 @@
 ## 次にやること
 
 1. GitHub の private リポジトリ（`lenalab-me/devsrv` を想定）を作って push する。まだ作っていない（外に出す操作なので、ユーザーに確かめてから）。
-2. Linux で一度も動かしていない。リポジトリができたら `gh workflow run test.yml`（macOS と ubuntu）を回す。Linux の `/proc` まわり（`src/os/linux.rs`）は単体テストの parser 以外、未確認。
+2. 対象は macOS だけ（2026-10-07、ユーザーと決めた。このマシンでしか使わない）。`src/os/linux.rs` は残してあるが、一度もビルドしていない。Linux が要るようになったら、CI の matrix に ubuntu を戻して確かめる。
 3. 数日たったら `tools/baseline.py --since 2026-10-06T23:57Z` で前後を比べる。devsrv が使われているか（`devsrv` の行）、sleep・lsof・pkill が減ったか。
 4. 指示なしの試用とベンチ（rpatch の `tools/bench/` の形）。まだ作っていない。
 5. 使われるようになったら、edit-guard のフックに「`pkill -f` や単独の `sleep` に devsrv を案内する」規則を足すのを考える（止めすぎない）。

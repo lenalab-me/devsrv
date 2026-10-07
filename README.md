@@ -21,4 +21,4 @@ devsrv stop web
 - [検証のスキル](.agents/skills/verify-devsrv/SKILL.md): 実際に動かして証拠を残す手順と、機能ごとの地図
 - 決定の記録: `.audit/devsrv.tsv`
 
-macOS が主。Linux でも動くように書いてあり（`/proc` を読む）、Linux のテストは GitHub Actions の手動の workflow（`.github/workflows/test.yml`）で回す。
+対象は macOS だけ（このマシンで使う）。`src/os/linux.rs` は書いてあるが、一度もビルドも実行もしていない。CI は手動の workflow（`.github/workflows/test.yml`、macOS）。
