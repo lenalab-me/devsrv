@@ -2,6 +2,8 @@
 
 新しいセッションは、この文書から始める。2026-10-07 に rpatch のセッション（`~/project/prod/rpatch`）で、普段のセッションのログを調べて決めた。同じ日に、別のセッションが下の「進め方の案」の 1〜4 と 5 の半分を済ませた（次の節）。
 
+試用や測った結果などの記録は、2026-10-15 から `~/project/prod/harness-engineering/` に置く（導入・案内の変更と測った結果は `changes.md`、devsrv だけの試用やベンチは `notes/devsrv/`）。それより前の基準（`baseline-2026-10-07.txt`）は `~/project/prod/devsrv-notes/` にそのまま残してある。
+
 ## 今どこまでできたか（2026-10-07）
 
 - **動くもの.** `start` / `ls` / `logs` / `stop` / `who` / `wait` の 6 つ。`cargo install --locked --path .` で `~/.cargo/bin/devsrv`（0.1.0）に入れた。設計は `docs/design.md`、完了の条件と段は `docs/plan.md`、決定の記録は `.audit/devsrv.tsv`（どれもコミット済み）。
