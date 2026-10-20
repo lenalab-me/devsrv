@@ -19,8 +19,7 @@ Examples:
 start runs CMD in the background (no shell; `-- sh -c '...'` for one) and returns when
 it is ready. {port} in ARGS becomes the port, also given as $PORT (do not write $PORT
 yourself: your shell would expand it first). --ready defaults to http with a port, else
-none (still running after 0.5s). http is ready on a status from 200 to 499.
-A name runs once per git top level (or directory): a second start fails until stop.
+none. A name runs once per git top level (or directory): a second start fails until stop.
 The command keeps running after start returns; its stdout and stderr go to the log.
 
 Output: the first line is the result. start prints only the address on stdout
@@ -32,23 +31,43 @@ Exit status: 0 ok; 1 the condition did not hold (exited, not ready in time, alre
 started, unknown name, port in use, who: port free); 2 invalid input, or CMD cannot be
 run; 3 devsrv could not work (state directory, broken record, the OS did not answer).
 
-Details
--------
-State lives in $DEVSRV_STATE_DIR, else $XDG_STATE_HOME/devsrv, else
-~/.local/state/devsrv. If it is not writable (a sandbox), start fails before running
-anything; set DEVSRV_STATE_DIR to a writable directory and keep it for later calls.
+start: ready checks, ports and the supervisor
+  http is ready on a status from 200 to 499; none means still running after 0.5s.
+  --port auto picks a free port on 127.0.0.1. A fixed --port that is already in use
+  fails with its owner. Before saying ready, devsrv checks that the port is held by the
+  command's process group, not by someone else.
+  Each start leaves one small supervisor process (devsrv __supervise) that records the
+  exit status and does the stopping. When the command exits on its own, what is left of
+  its group is stopped too, so do not background the server inside CMD
+  (`sh -c 'server &'`). A single quoted CMD with spaces ("npm run dev") is run with sh -c.
+  Everything after `--` is the command's own: `start web -- npx vite --help` gives
+  --help to vite, not to devsrv.
 
-Each start leaves one small supervisor process (devsrv __supervise) that records the
-exit status and does the stopping. stop sends TERM to the command's process group,
-waits up to 5s, then KILL. A child that leaves the group (setsid, daemonizing) is not
-followed. When the command exits on its own, what is left of its group is stopped too,
-so do not background the server inside CMD (`sh -c 'server &'`).
+stop: what it stops
+  stop sends TERM to the command's process group, waits up to 5s, then KILL. A child
+  that leaves the group (setsid, daemonizing) is not followed. Only process groups that
+  devsrv started are stopped.
 
---port auto picks a free port on 127.0.0.1. A fixed --port that is already in use
-fails with its owner. Before saying ready, devsrv checks that the port is held by the
-command's process group, not by someone else.
+ls: what devsrv started
+  One line per name: state, pid, port, age and the directory. ls shows this git top
+  level (or directory); --all shows every one.
 
-Options also take the form --opt=value. --timeout takes 30, 30s, 500ms or 2m. A
-single quoted CMD with spaces ("npm run dev") is run with sh -c.
-wait also takes --port N, --file PATH, --log NAME REGEX, --gone PID and a bare port.
-logs --follow-until matches lines from the start of the current run's log.
+logs: the log of one name
+  logs NAME prints the last -n lines (50). --follow-until REGEX waits for a line that
+  matches, reading from the start of the current run's log, up to --timeout.
+
+who: who listens on a port
+  who PORT names the process that listens, and the devsrv name if devsrv started it.
+  It never stops anything. Exit status 1 when the port is free.
+
+wait: wait for a condition
+  wait takes URL, port N, file PATH, log NAME REGEX or gone PID. It also takes
+  --port N, --file PATH, --log NAME REGEX, --gone PID and a bare port.
+
+state: where devsrv keeps its records
+  State lives in $DEVSRV_STATE_DIR, else $XDG_STATE_HOME/devsrv, else
+  ~/.local/state/devsrv. If it is not writable (a sandbox), start fails before running
+  anything; set DEVSRV_STATE_DIR to a writable directory and keep it for later calls.
+
+spelling: how options are written
+  Options also take the form --opt=value. --timeout takes 30, 30s, 500ms or 2m.

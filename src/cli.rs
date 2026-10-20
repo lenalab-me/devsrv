@@ -10,10 +10,9 @@ use regex_lite::Regex;
 use crate::model::{Name, Ready};
 use crate::report::Failure;
 
-pub const HELP: &str = include_str!("help.txt");
-
 pub enum Cmd {
-    Help,
+    /// `help [NAME]` or `NAME --help`: the summary, or what `help::render` makes of the name.
+    Help(Option<String>),
     Version,
     Supervise,
     Start(StartArgs),
@@ -86,7 +85,7 @@ fn usage_of(sub: &str) -> &'static str {
 fn bad(sub: &str, message: impl Into<String>) -> Failure {
     Failure::usage(message)
         .detail(format!("usage: {}", usage_of(sub)))
-        .hint("devsrv --help | head -40")
+        .hint(format!("devsrv help {sub}"))
 }
 
 /// Splits `--opt=value` and reads the value of `--opt value`.
@@ -215,18 +214,36 @@ pub fn ready(text: &str) -> Result<Ready, Failure> {
 
 /// Parses the arguments after the program name.
 pub fn parse(raw: Vec<String>) -> (bool, Result<Cmd, Failure>) {
-    // --json, --help and --version count anywhere before `--`.
+    // --json, --help and --version count anywhere before `--`; what follows `--` is the
+    // command that `start` runs, and its `--help` is its own.
     let dashdash = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
     let json = raw[..dashdash].iter().any(|a| a == "--json");
-    let help = raw[..dashdash].iter().any(|a| a == "-h" || a == "--help");
     let items: Vec<String> = raw
         .iter()
         .enumerate()
         .filter(|(i, a)| *i >= dashdash || a.as_str() != "--json")
         .map(|(_, a)| a.clone())
         .collect();
+    let dashdash = items.iter().position(|a| a == "--").unwrap_or(items.len());
+    let before = &items[..dashdash];
+    let help = before.iter().any(|a| a == "-h" || a == "--help");
     if help || items.is_empty() || items[0] == "help" {
-        return (json, Ok(Cmd::Help));
+        let mut names = before
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .filter(|a| a.as_str() != "help");
+        let name = names.next().cloned();
+        let extra = names.next().filter(|_| items[0] == "help");
+        if let (Some(_), Some(extra)) = (&name, extra) {
+            return (
+                json,
+                Err(
+                    Failure::usage(format!("help takes one name, not `{extra}`"))
+                        .hint("devsrv help COMMAND"),
+                ),
+            );
+        }
+        return (json, Ok(Cmd::Help(name)));
     }
     if items[0] == "-V" || items[0] == "--version" {
         return (json, Ok(Cmd::Version));
@@ -235,18 +252,18 @@ pub fn parse(raw: Vec<String>) -> (bool, Result<Cmd, Failure>) {
 }
 
 fn parse_sub(items: Vec<String>) -> Result<Cmd, Failure> {
-    let sub: &'static str = match items[0].as_str() {
-        "start" | "run" => "start",
-        "ls" | "list" | "ps" => "ls",
-        "logs" | "log" => "logs",
-        "stop" | "kill" => "stop",
+    let sub: &'static str = match crate::help::canonical(&items[0]) {
+        "start" => "start",
+        "ls" => "ls",
+        "logs" => "logs",
+        "stop" => "stop",
         "who" => "who",
         "wait" => "wait",
         "__supervise" => return Ok(Cmd::Supervise),
         other => {
             return Err(Failure::usage(format!("unknown command `{other}`"))
                 .detail("commands: start, ls, logs, stop, who, wait")
-                .hint("devsrv --help | head -40"));
+                .hint("devsrv --help"));
         }
     };
     let mut a = Args { items, pos: 1, sub };

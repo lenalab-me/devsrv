@@ -4,6 +4,10 @@
 
 試用や測った結果などの記録は、2026-10-15 から `~/project/prod/harness-engineering/` に置く（導入・案内の変更と測った結果は `changes.md`、devsrv だけの試用やベンチは `notes/devsrv/`）。それより前の基準（`baseline-2026-10-07.txt`）は `~/project/prod/devsrv-notes/` にそのまま残してある。
 
+## help を 2 段にする（2026-10-20、ブランチ `help-split`。main への取り込みと `cargo install` はまだ）
+
+エージェントが `--help | head -40` のように先頭だけを読むので、`--help` を要約だけ（40 行以内、案内つき）にし、詳しい説明は `devsrv help COMMAND`・`devsrv COMMAND --help`、全文は `devsrv help all` で引くようにした（agentlog と同じ作り。クレートは共有せず、`src/help.rs` が自分のコピー）。正本は今までどおり `src/help.txt` 1 ファイル。切り分けと名前の対応（`TOPICS`）は `src/help.rs`。節の見出しは空行のあとの行頭の行なので、`help.txt` に節を足すときは前に空行を入れ、`TOPICS` に名前を足す（足し忘れるとテスト `c11_every_section_of_help_txt_is_asked_for_by_some_name` が落ちる。対応から外して落ちることを確かめた）。`start` の `--` より後ろの `--help` は起動するコマンドのものとして扱う（`c11_help_after_dash_dash_belongs_to_the_command`。判定を `--` の前に限る処理を外すと落ちることを確かめた）。別名（`run`・`ps` など）は `help::canonical` の 1 か所。
+
 ## 今どこまでできたか（2026-10-07）
 
 - **動くもの.** `start` / `ls` / `logs` / `stop` / `who` / `wait` の 6 つ。`cargo install --locked --path .` で `~/.cargo/bin/devsrv`（0.1.0）に入れた。設計は `docs/design.md`、完了の条件と段は `docs/plan.md`、決定の記録は `.audit/devsrv.tsv`（どれもコミット済み）。
@@ -72,7 +76,7 @@ devsrv wait http://…|port N|--file PATH|--log NAME REGEX|--gone PID [--timeout
 
 ## rpatch から持ってくる教訓
 
-- **`--help` の先頭 40 行に、書き方・主な使い方・出力・終了コードを収める。** エージェントは `--help | head -40` で読む。
+- **`--help` は 40 行以内の要約（書き方・主な使い方・出力・終了コード）にし、詳しい説明は `help COMMAND`・`COMMAND --help` で引く。** エージェントは `--help | head -40` で読み、何行で切るかは呼ぶ側で決められない。
 - **失敗は大きな音で、直し方つきで。** どこで何が足りないかを 1 行目で言い、次の 1 回で直せるヒントを付ける。ログの末尾も見せる。
 - **書式はゆるく、動作は厳しく。** 意味がひとつにしか取れない書き方の揺れは受け付ける。止めると、エージェントは確かめのない別の手（ここでは `pkill -f` や `sleep`）に逃げる。
 - **作る前に基準を取り、入れたあとにログで測る。** `tools/baseline.py` に `--since` があるので、入れた時刻から後だけを数えられる。
@@ -87,7 +91,7 @@ p3 のスキルを使う。`figure-it-out` で全体を組み立て、型と構�
 1. 枠組み: 完了の条件を、確かめられる形で書く（例: 模擬サーバーを `start --port auto --ready http` で起動して URL が返る、`stop` で子プロセスまで消える、他人のプロセスは止めない、`wait` が時間切れで失敗する）。
 2. 設計: 状態の持ち方、プロセスグループ、PID の使い回し対策、空きポートの選び方の競合（選んでから bind するまでの間）、準備の判定の種類。
 3. 実装: `start` / `stop` / `ls` / `logs` から始め、`wait` と `who` を足す。結合テストは、本物のプロセス（小さなサーバー）を立てて行う。
-4. 検証のスキル（`/create-verification-skill`）、`--help` の先頭 40 行の確認、`cargo install` で入れる。
+4. 検証のスキル（`/create-verification-skill`）、`--help` が 40 行以内に収まる確認（済み）、`cargo install` で入れる。
 5. CLAUDE.md（と AGENTS.md・Cursor）に 1 行足し、その時刻を残す。試用とベンチを回し、`tools/baseline.py --since <時刻>` で前後を比べる。
 
 ## 決めたこと（2026-10-07、ユーザーと）

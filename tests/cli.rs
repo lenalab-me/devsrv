@@ -481,10 +481,16 @@ fn c10_the_same_name_in_two_projects_does_not_collide() {
 }
 
 #[test]
-fn c11_the_first_40_lines_of_help_say_how_to_use_it() {
+fn c11_the_summary_of_the_help_says_how_to_use_it_in_40_lines() {
     let env = Env::new();
+    for args in [&["--help"][..], &["-h"], &["help"], &[]] {
+        let r = env.run(args);
+        assert_eq!(r.code, 0, "{args:?}");
+        let n = r.stdout.lines().count();
+        assert!(n <= 40, "`devsrv {args:?}` prints {n} lines:\n{}", r.stdout);
+        assert!(r.stdout.contains("devsrv help all"), "{}", r.stdout);
+    }
     let r = env.run(&["--help"]);
-    assert_eq!(r.code, 0);
     let head: String = r.stdout.lines().take(40).collect::<Vec<_>>().join("\n");
     for needle in [
         "Usage:",
@@ -500,6 +506,145 @@ fn c11_the_first_40_lines_of_help_say_how_to_use_it() {
         "Exit status: 0",
     ] {
         assert!(head.contains(needle), "missing {needle}");
+    }
+}
+
+const HELP_TXT: &str = include_str!("../src/help.txt");
+
+/// The headings of help.txt: lines not indented, after the summary.
+fn help_headings() -> Vec<&'static str> {
+    let lines: Vec<&str> = HELP_TXT.lines().collect();
+    let exit = lines
+        .iter()
+        .position(|l| l.starts_with("Exit status:"))
+        .unwrap();
+    let blank = exit + lines[exit..].iter().position(|l| l.is_empty()).unwrap();
+    let mut out = Vec::new();
+    for i in blank + 1..lines.len() {
+        if !lines[i].is_empty() && !lines[i].starts_with(' ') {
+            assert!(
+                lines[i - 1].is_empty(),
+                "help.txt: `{}` is not indented but follows a line; a heading needs a blank line before it",
+                lines[i]
+            );
+            out.push(lines[i]);
+        }
+    }
+    out
+}
+
+#[test]
+fn c11_help_for_a_command_has_its_section_and_not_the_others() {
+    let env = Env::new();
+    let r = env.run(&["help", "start"]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("devsrv start NAME [--port"),
+        "{}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("\nstart: ready checks"), "{}", r.stdout);
+    for other in ["\nstop: ", "\nwho: ", "\nlogs: ", "Examples:"] {
+        assert!(!r.stdout.contains(other), "{other}: {}", r.stdout);
+    }
+    assert!(r.stdout.contains("devsrv help state"), "{}", r.stdout);
+    let r = env.run(&["help", "state"]);
+    assert!(r.stdout.starts_with("state: "), "{}", r.stdout);
+}
+
+#[test]
+fn c11_command_dash_dash_help_is_help_for_the_command() {
+    let env = Env::new();
+    for name in ["start", "ls", "logs", "stop", "who", "wait", "run", "ps"] {
+        let want = env.run(&["help", name]);
+        assert_eq!(want.code, 0, "{name}");
+        for flag in ["--help", "-h"] {
+            let got = env.run(&[name, flag]);
+            assert_eq!((got.code, &got.stdout), (0, &want.stdout), "{name} {flag}");
+        }
+    }
+}
+
+#[test]
+fn c11_help_all_is_the_whole_of_help_txt() {
+    let env = Env::new();
+    let r = env.run(&["help", "all"]);
+    assert_eq!(r.code, 0);
+    assert_eq!(r.stdout, HELP_TXT);
+}
+
+#[test]
+fn c11_help_for_an_unknown_name_says_so_and_lists_the_names() {
+    let env = Env::new();
+    let r = env.run(&["help", "foo"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stdout.is_empty());
+    let first = r.stderr.lines().next().unwrap();
+    assert!(
+        first.contains("`foo`") && first.contains("start") && first.contains("spelling"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(env.run(&["foo", "--help"]).code, 2);
+    assert_eq!(env.run(&["help", "a", "b"]).code, 2);
+}
+
+/// The words after `--` are the command's own: its `--help` is not devsrv's.
+#[test]
+fn c11_help_after_dash_dash_belongs_to_the_command() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "h",
+        "--ready",
+        "none",
+        "--",
+        "sh",
+        "-c",
+        r#"printf 'got:%s\n' "$@"; sleep 30"#,
+        "sh",
+        "--help",
+        "-h",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("pid "), "{}", r.stdout);
+    let log = env.run(&["logs", "h"]);
+    assert!(
+        log.stdout.contains("got:--help") && log.stdout.contains("got:-h"),
+        "{}",
+        log.stdout
+    );
+    assert_eq!(env.run(&["stop", "h"]).code, 0);
+}
+
+/// A section of help.txt that no name asks for would be written but never read.
+#[test]
+fn c11_every_section_of_help_txt_is_asked_for_by_some_name() {
+    let env = Env::new();
+    let r = env.run(&["help", "foo"]);
+    let list = r
+        .stderr
+        .lines()
+        .next()
+        .unwrap()
+        .split("try: ")
+        .nth(1)
+        .unwrap();
+    let names: Vec<&str> = list.split(", ").filter(|n| *n != "all").collect();
+    assert!(names.len() >= 6, "{names:?}");
+    let mut shown = String::new();
+    for name in names {
+        let r = env.run(&["help", name]);
+        assert_eq!(r.code, 0, "{name}");
+        shown.push_str(&r.stdout);
+    }
+    let headings = help_headings();
+    assert!(headings.len() >= 6, "{headings:?}");
+    for h in headings {
+        assert!(
+            shown.lines().any(|l| l == h),
+            "no name of `devsrv help` prints the section `{h}`"
+        );
     }
 }
 
