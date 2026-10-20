@@ -1,4 +1,4 @@
-//! The definition of done (docs/plan.md), checked with real processes. Each test has its
+//! The definition of done, checked with real processes. Each test has its
 //! own state directory and project directory, and stops what it started when it ends.
 
 use std::io::{Read, Write};

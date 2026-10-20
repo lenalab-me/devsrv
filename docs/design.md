@@ -1,6 +1,6 @@
 # devsrv の設計
 
-2026-10-07。architect の arena で 3 モデル（Fable 5.1、GPT-6.1-Sol、Grok 4.7）が出した案を、別のモデル（GPT-6.1-Sol）が採点し、1 つにまとめた。もとの案は `/tmp/arena-devsrv/candidate-{a,b,c}/`（リポジトリの外）。決定の記録は `.audit/devsrv.tsv`。
+2026-10-07。architect の arena で 3 モデル（Fable 5.1、GPT-6.1-Sol、Grok 4.7）が出した案を、別のモデル（GPT-6.1-Sol）が採点し、1 つにまとめた。
 
 ## 問題
 
