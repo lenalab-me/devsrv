@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Read-only: is the binary under test current, and is the user's own devsrv state untouched?
+# Read-only: is the binary under test built from the current sources, and is any verify session still running?
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/../../../.." && pwd)"
 bin="${DEVSRV_BIN:-$repo/target/debug/devsrv}"
+case "$bin" in /*) ;; *) bin="$PWD/$bin" ;; esac
 status=0
 if [ ! -x "$bin" ]; then
 	echo "FAIL: no binary at $bin (run cargo build)"

@@ -15,7 +15,7 @@ From the repo root:
 cargo build                      # the binary under test: target/debug/devsrv
 ```
 
-Ready when `target/debug/devsrv -V` prints the version in `Cargo.toml`. Verify the working tree's build, not the `devsrv` on PATH (`~/.cargo/bin/devsrv` is the installed one and may be older). For a release build, set `DEVSRV_BIN=target/release/devsrv`.
+Ready when `target/debug/devsrv -V` prints the version in `Cargo.toml`. Verify the working tree's build, not the `devsrv` on PATH (`~/.cargo/bin/devsrv` is the installed one and may be older). For a release build, set `DEVSRV_BIN=target/release/devsrv` (a relative path is taken from where you run the script).
 
 ## Doctor
 
@@ -36,9 +36,9 @@ S=start-http-$(date +%s)
 ```
 
 - `drive.sh SESSION ARGS...` runs `devsrv ARGS...` in the session's project dir (a directory with a `.git`, so it is its own scope) with `DEVSRV_STATE_DIR` set to the session's state dir. It prints a summary (args, exit code, stdout, stderr, and `devsrv ls` right after) and saves it as the next `step-NN/`.
-- `drive.sh SESSION --sh 'line'` runs a shell line in the same place, with `$DEVSRV` pointing at the binary and `DEVSRV_STATE_DIR` set. Use it for the observation half of a proof: `curl` the address, `ps -o pid,pgid,stat,command -g PGID` the group, run the binary from a subshell that exits (`sh -c '$DEVSRV start …; exit'`).
+- `drive.sh SESSION --sh 'line'` runs a shell line in the same place, with `$DEVSRV` pointing at the binary and `DEVSRV_STATE_DIR` set. Use it for the observation half of a proof: `curl` the address, list the group with `ps -eo pid,pgid,stat,command | awk -v p=PGID 'NR==1||$2==p'` (not `ps -g`: on Linux it selects by session, so it is empty even while the group lives), run the binary from a subshell that exits (`sh -c '$DEVSRV start …; exit'`).
 - The script's own exit status is 0 even when devsrv fails: read `exit code:` in the summary.
-- Feature recipes with exact commands and expected results are in `features/`; start at `features/README.md`. The first 40 lines of `target/debug/devsrv --help` are what agents read.
+- Feature recipes with exact commands and expected results are in `features/`; start at `features/README.md`. Agents read `devsrv --help` (a summary of 35 lines; it must stay within 40), then `devsrv help COMMAND` for one command and `devsrv help all` for the whole text.
 
 ## Evidence
 
@@ -62,4 +62,4 @@ Runs `devsrv stop --all` with the session's state dir and fails unless nothing o
 
 ## Isolation
 
-Any number of sessions can run at once: each has its own state dir, project dir, and ports (`--port auto`). Do not point a session at the user's state dir, and do not use fixed ports the user may own (8765 is the user's dashboard; 8787 to 8799 are beat-jam's mock servers). To check behavior against a port someone else holds, open a listener in the session yourself (`python3 -m http.server 0 &` inside `--sh`, and kill that PID at the end of the same line).
+Any number of sessions can run at once: each has its own state dir, project dir, and ports (`--port auto`). Do not point a session at the user's state dir, and do not use fixed ports: something of the user's may be listening there. To check behavior against a port someone else holds, open a listener in the session yourself (`python3 -m http.server 0 &` inside `--sh`, and kill that PID at the end of the same line).

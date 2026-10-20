@@ -10,6 +10,7 @@ if [ "$#" -ne 1 ]; then
 fi
 repo="$(cd "$(dirname "$0")/../../../.." && pwd)"
 bin="${DEVSRV_BIN:-$repo/target/debug/devsrv}"
+case "$bin" in /*) ;; *) bin="$PWD/$bin" ;; esac
 dir="$repo/target/verify-devsrv/$1"
 [ -d "$dir/state" ] || { echo "no session $1"; exit 1; }
 cd "$dir/proj"

@@ -11,6 +11,7 @@ if [ "$#" -lt 2 ]; then
 fi
 repo="$(cd "$(dirname "$0")/../../../.." && pwd)"
 bin="${DEVSRV_BIN:-$repo/target/debug/devsrv}"
+case "$bin" in /*) ;; *) bin="$PWD/$bin" ;; esac
 session="$1"
 shift
 dir="$repo/target/verify-devsrv/$session"

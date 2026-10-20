@@ -28,14 +28,15 @@ $ devsrv start api -- sh -c 'echo "config.toml: no such file" >&2; exit 3'
 devsrv: api exited with code 3 after 0.1s, before it was ready
   log (last 1 of 1 lines): …/api/log
   | config.toml: no such file
-  hint: fix the command and start again; nothing is left running
+  hint: fix the command and start again
+  hint: nothing of it is left running
 [exit 1]
 
 $ devsrv stop web
 web: stopped (TERM, 0.1s)
 [exit 0]
 $ devsrv stop web
-web: already stopped (stopped 4s ago)
+web: already stopped (4s ago)
 [exit 0]
 
 $ devsrv who 8765
@@ -117,7 +118,7 @@ devsrv start（エージェントのシェル）       devsrv __supervise（切�
 
 ### who
 
-macOS は `lsof -nP -iTCP:PORT -sTCP:LISTEN -Fp`（2 秒の期限）、Linux は `/proc/net/tcp{,6}` と `/proc/<pid>/fd`。見つけた PID の pgid を、すべてのプロジェクトの生きている記録の子と照らし、devsrv の名前か、PID とコマンドかを出す。止めない。
+macOS は `lsof -nP -iTCP:PORT -sTCP:LISTEN -Fp`（3 秒の期限）、Linux は `/proc/net/tcp{,6}` と `/proc/<pid>/fd`。見つけた PID の pgid を、すべてのプロジェクトの生きている記録の子と照らし、devsrv の名前か、PID とコマンドかを出す。止めない。
 
 ### 出力と終了コード
 
@@ -177,5 +178,5 @@ macOS は `lsof -nP -iTCP:PORT -sTCP:LISTEN -Fp`（2 秒の期限）、Linux は
 
 ## 未決と危険
 
-- Codex のサンドボックスの中で、flock、libproc、lsof、ループバックの bind が通るか。通らないものは `Denied` として送らない側に倒す。E 段で確かめる。
-- Linux は手元で動かせない。CI（手動の workflow）で確かめる。
+- Codex のサンドボックスの中で、flock、libproc、lsof、ループバックの bind が通るか（まだ確かめていない）。通らないものは `Denied` として送らない側に倒す。
+- Linux は 2026-10-20 に Ubuntu 24.04（arm64）で確かめた（ビルド、主なコマンド、`cargo test`）。実地の使い込みはまだない。CI（手動の workflow）は macOS だけ。

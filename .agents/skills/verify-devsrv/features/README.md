@@ -6,12 +6,12 @@ The maintained source for verifying what agents see of devsrv. Read this index, 
 
 - `cargo build`, then `scripts/doctor.sh` prints `OK`.
 - A fresh session name per run: `S=<feature>-$(date +%s)`. `D=.agents/skills/verify-devsrv/scripts`.
-- `python3` on PATH (the recipes use `python3 -m http.server` as the dev server).
+- `python3` on PATH (the recipes use `python3 -m http.server` as the dev server), and `jq` and `curl` (they read the JSON and the address). On Linux, **who-foreign** also needs `lsof`, or use `ss -ltnp` to find the port.
 
 ## Driving conventions
 
 - Every call goes through `$D/drive.sh $S …`; observation lines go through `$D/drive.sh $S --sh '…'` with `$DEVSRV`.
-- Use `--port auto`. Never use ports the user owns (8765, 8787 to 8799).
+- Use `--port auto`. Never use fixed ports: something of the user's may be listening there.
 - End every recipe with `$D/cleanup.sh $S`, also after a failed step.
 
 ## Proof
