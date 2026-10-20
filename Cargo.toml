@@ -3,6 +3,7 @@ name = "devsrv"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
 description = "Start, wait for, inspect and stop dev servers for coding agents"
 
 [dependencies]
