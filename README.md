@@ -21,4 +21,4 @@ devsrv stop web
 - [検証のスキル](.agents/skills/verify-devsrv/SKILL.md): 実際に動かして証拠を残す手順と、機能ごとの地図
 - 決定の記録: `.audit/devsrv.tsv`
 
-対象は macOS だけ（このマシンで使う）。`src/os/linux.rs` は書いてあるが、一度もビルドも実行もしていない。CI は手動の workflow（`.github/workflows/test.yml`、macOS）。
+使い込んでいるのは macOS（このマシン）。Linux（`src/os/linux.rs`）は 2026-10-20 に Ubuntu 24.04（arm64、Apple container の中）でビルドし、`start`・`ls`・`wait`・`who`・`logs`・`stop` が動き、`cargo test` が全部通ることを確かめた（実地の使い込みはまだない）。CI は手動の workflow（`.github/workflows/test.yml`、macOS）。

@@ -305,7 +305,7 @@ fn c05_a_reused_pid_is_not_signalled() {
         .status()
         .unwrap();
     Command::new("kill")
-        .args(["-KILL", &format!("-{child}")])
+        .args(["-KILL", "--", &format!("-{child}")])
         .status()
         .unwrap();
     assert!(eventually(Duration::from_secs(5), || !group_alive(child)));
@@ -1030,7 +1030,7 @@ fn what_a_dead_leader_left_in_an_orphan_group_is_named_not_signalled() {
     );
     assert!(group_alive(pgid), "nothing was sent");
     Command::new("kill")
-        .args(["-KILL", &format!("-{pgid}")])
+        .args(["-KILL", "--", &format!("-{pgid}")])
         .status()
         .unwrap();
     assert!(eventually(Duration::from_secs(5), || !group_alive(pgid)));
