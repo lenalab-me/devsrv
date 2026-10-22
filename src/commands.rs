@@ -168,9 +168,17 @@ fn already_started(inst: &Instance) -> Failure {
     }
 }
 
-/// A fixed port that already accepts connections, or cannot be bound, is in use.
-fn port_in_use(port: u16) -> bool {
-    answers(port) || TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+/// A fixed port that already accepts connections, or cannot be bound, is in use; one
+/// that may not be bound by this user (below 1024 on Linux) is not.
+fn port_in_use(port: u16) -> Result<bool, std::io::Error> {
+    if answers(port) {
+        return Ok(true);
+    }
+    match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+        Ok(_) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Err(e),
+        Err(_) => Ok(true),
+    }
 }
 
 fn owner_text(pid: i32) -> String {
@@ -259,7 +267,15 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
             )
         }
         Some(PortArg::Fixed(p)) => {
-            if port_in_use(p) {
+            let in_use = port_in_use(p).map_err(|e| {
+                Failure::new(
+                    USAGE,
+                    "port_denied",
+                    format!("port {p} may not be bound by this user ({e}); nothing was started"),
+                )
+                .hint("use --port auto, or a port from 1024 up (ports below 1024 need privileges on Linux)")
+            })?;
+            if in_use {
                 return Err(Failure::new(
                     NOT_MET,
                     "port_in_use",

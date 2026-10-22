@@ -1751,3 +1751,31 @@ fn stop_is_not_thrown_by_processes_that_come_and_go() {
     }
     drop(churn);
 }
+
+/// A port this user may not bind (below 1024 on Linux, without privileges) is not "in
+/// use": the failure says why. Where every port may be bound (macOS), nothing to check.
+#[test]
+fn a_port_that_may_not_be_bound_is_a_permission_error_not_in_use() {
+    let env = Env::new();
+    let denied = (1000u16..1024).rev().find(|&p| {
+        matches!(TcpListener::bind(("127.0.0.1", p)),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    let Some(p) = denied else {
+        eprintln!("every low port may be bound here; nothing to check");
+        return;
+    };
+    let port = p.to_string();
+    let mut args = vec!["start", "web", "--port", &port];
+    args.extend_from_slice(&SERVER[2..]);
+    let r = env.run(&args);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr
+            .starts_with(&format!("devsrv: port {p} may not be bound by this user")),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("cannot see"), "{}", r.stderr);
+    assert_eq!(env.process("web"), Value::Null);
+}
