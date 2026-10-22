@@ -106,13 +106,38 @@ struct Args {
     items: Vec<String>,
     pos: usize,
     sub: &'static str,
+    /// `--json` and `--help` met by `next_opt`.
+    json: bool,
+    help: bool,
 }
 
 impl Args {
+    fn new(items: Vec<String>, sub: &'static str) -> Args {
+        Args {
+            items,
+            pos: 1,
+            sub,
+            json: false,
+            help: false,
+        }
+    }
     fn next(&mut self) -> Option<String> {
         let a = self.items.get(self.pos).cloned();
         self.pos += 1;
         a
+    }
+    /// The next argument where an option of devsrv may stand, with `--json` and `--help`
+    /// taken out. Once the command of `start` or `wait cmd` begins, its arguments are
+    /// read with `next` or `rest`, so the same words there stay the command's own.
+    fn next_opt(&mut self) -> Option<String> {
+        loop {
+            let a = self.next()?;
+            match a.as_str() {
+                "--json" => self.json = true,
+                "-h" | "--help" => self.help = true,
+                _ => return Some(a),
+            }
+        }
     }
     fn peek(&self) -> Option<&str> {
         self.items.get(self.pos).map(String::as_str)
@@ -261,8 +286,39 @@ pub fn ready(text: &str) -> Result<Ready, Failure> {
 
 /// Parses the arguments after the program name.
 pub fn parse(raw: Vec<String>) -> (bool, Result<Cmd, Failure>) {
-    // --json, --help and --version count anywhere before `--`; what follows `--` is the
-    // command that `start` runs, and its `--help` is its own.
+    // `start` and `wait cmd` run a command, which begins at `--` or at its first word
+    // (`start web node a.js --help`): its `--help` and `--json` are its own. Their parsers
+    // take devsrv's flags only where an option of theirs may stand.
+    let lead = raw
+        .iter()
+        .take_while(|a| a.starts_with('-') && a.as_str() != "--")
+        .count();
+    let sub: Option<&'static str> = match raw.get(lead).map(|w| crate::help::canonical(w)) {
+        Some("start") => Some("start"),
+        Some("wait") => Some("wait"),
+        _ => None,
+    };
+    if let Some(sub) = sub {
+        let word = raw[lead].clone();
+        let flags = &raw[..lead];
+        let json = flags.iter().any(|a| a == "--json");
+        let help = flags.iter().any(|a| a == "-h" || a == "--help");
+        if !help && flags.iter().any(|a| a == "-V" || a == "--version") {
+            return (json, Ok(Cmd::Version));
+        }
+        let mut a = Args::new(raw[lead..].to_vec(), sub);
+        let cmd = if sub == "start" {
+            start(&mut a)
+        } else {
+            wait(&mut a)
+        };
+        if help || a.help {
+            return (json || a.json, Ok(Cmd::Help(Some(word))));
+        }
+        return (json || a.json, cmd);
+    }
+    // The other commands run nothing: --json, --help and --version count anywhere
+    // before `--`.
     let dashdash = raw.iter().position(|a| a == "--").unwrap_or(raw.len());
     let json = raw[..dashdash].iter().any(|a| a == "--json");
     let items: Vec<String> = raw
@@ -313,7 +369,7 @@ fn parse_sub(items: Vec<String>) -> Result<Cmd, Failure> {
                 .hint("devsrv --help"));
         }
     };
-    let mut a = Args { items, pos: 1, sub };
+    let mut a = Args::new(items, sub);
     match sub {
         "start" => start(&mut a),
         "ls" => {
@@ -362,10 +418,10 @@ fn parse_sub(items: Vec<String>) -> Result<Cmd, Failure> {
 
 fn start(a: &mut Args) -> Result<Cmd, Failure> {
     let sub = a.sub;
-    let n = name(sub, a.next())?;
+    let n = name(sub, a.next_opt())?;
     let (mut port_arg, mut ready_arg, mut t) = (None, None, DEFAULT_TIMEOUT);
     let mut argv = Vec::new();
-    while let Some(x) = a.next() {
+    while let Some(x) = a.next_opt() {
         if x == "--" {
             argv = a.rest();
             break;
@@ -486,7 +542,7 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
     let mut codes: Option<Statuses> = None;
     // After `cmd`: the first argument that is not an option starts the command.
     let mut cmd = false;
-    while let Some(x) = a.next() {
+    while let Some(x) = a.next_opt() {
         if cmd && target.is_none() && !x.starts_with('-') && x.contains(char::is_whitespace) {
             // `cmd 'curl -sf URL' --timeout 5`: a quoted shell line is the whole command,
             // so what follows it can only be devsrv's.

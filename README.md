@@ -17,7 +17,7 @@ devsrv who 8765                                                  # 持ち主を�
 devsrv stop web
 ```
 
-`{port}` は devsrv が空いているポートに置き換え、同じ値を `PORT` 環境変数にも入れる。`start` は準備ができたら住所を 1 行だけ出して返り、起動中に落ちたら終了コードとログの末尾を出して失敗する。同じ名前は git の top level（またはディレクトリ）ごとに 1 つで、動いているあいだの 2 回目の `start` は失敗する。使い方の要約は `devsrv --help`（40 行以内に書き方・使い方・出力・終了コード。`head -40` で切られても要約は全部届く）。コマンドごとの詳しい説明は `devsrv help COMMAND`（`devsrv COMMAND --help` も同じ。`state`・`spelling` の節も引ける）、全文は `devsrv help all`。`start NAME -- CMD ARGS...` の `--` より後ろは起動するコマンドの引数なので、そこにある `--help` は devsrv の help にならない。
+`{port}` は devsrv が空いているポートに置き換え、同じ値を `PORT` 環境変数にも入れる。`start` は準備ができたら住所を 1 行だけ出して返り、起動中に落ちたら終了コードとログの末尾を出して失敗する。同じ名前は git の top level（またはディレクトリ）ごとに 1 つで、動いているあいだの 2 回目の `start` は失敗する。使い方の要約は `devsrv --help`（40 行以内に書き方・使い方・出力・終了コード。`head -40` で切られても要約は全部届く）。コマンドごとの詳しい説明は `devsrv help COMMAND`（`devsrv COMMAND --help` も同じ。`state`・`spelling` の節も引ける）、全文は `devsrv help all`。`start NAME -- CMD ARGS...` と `wait cmd -- CMD ARGS...` の CMD から後ろ（`--` を省いたときは CMD の最初の語から）は起動するコマンドの引数なので、そこにある `--help`・`-h`・`--json` は devsrv のものにならない。
 
 直す前と後を並べて比べるときも、`nohup` や pid のファイルは要らない。名前を変えて 2 回 `start` すれば、別々のポートで 2 つ動く。前のコードは別の worktree に出し、直した側の checkout から両方を立てる。
 

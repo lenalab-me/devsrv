@@ -617,6 +617,50 @@ fn c11_help_after_dash_dash_belongs_to_the_command() {
     assert_eq!(env.run(&["stop", "h"]).code, 0);
 }
 
+/// Without `--`, the command begins at its first word: what follows is its own too.
+#[test]
+fn c11_help_and_json_in_a_command_without_dash_dash_are_the_commands() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "h",
+        "--ready",
+        "none",
+        "sh",
+        "-c",
+        r#"printf 'got:%s\n' "$@"; sleep 30"#,
+        "sh",
+        "-h",
+        "--json",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("pid "), "{}", r.stdout);
+    let log = env.run(&["logs", "h"]);
+    assert!(
+        log.stdout.contains("got:-h") && log.stdout.contains("got:--json"),
+        "{}",
+        log.stdout
+    );
+    assert_eq!(env.run(&["stop", "h"]).code, 0);
+    // `false -h` is run, and fails; devsrv's help is not a success.
+    let r = env.run(&["wait", "--timeout", "300ms", "cmd", "false", "-h", "x"]);
+    assert_eq!(r.code, 1, "{}{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("`false -h x`: not ready"), "{}", r.stderr);
+    let r = env.run(&["wait", "-t", "300ms", "cmd", "false", "--json"]);
+    assert_eq!(r.code, 1, "{}{}", r.stdout, r.stderr);
+    assert!(r.stdout.is_empty(), "{}", r.stdout);
+    // Before the command they are still devsrv's.
+    let r = env.run(&["wait", "-t", "300ms", "--json", "cmd", "false"]);
+    assert_eq!(r.code, 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&r.stdout).unwrap()["exit_code"],
+        1
+    );
+    let r = env.run(&["start", "h", "--port", "auto", "--help", "x", "{port}"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("devsrv start NAME"), "{}", r.stdout);
+}
+
 /// A section of help.txt that no name asks for would be written but never read.
 #[test]
 fn c11_every_section_of_help_txt_is_asked_for_by_some_name() {

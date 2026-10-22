@@ -28,7 +28,7 @@ The command keeps running after start returns; its stdout and stderr go to the l
 Output: the first line is the result. start prints only the address on stdout
 (http://127.0.0.1:PORT/, or 127.0.0.1:PORT, or pid N); notes go to stderr. A failure
 says what happened on the first line of stderr, then the log tail, then `hint:` lines
-with the command to run next. --json (anywhere before --) prints one JSON object on stdout.
+with the command to run next. --json (anywhere before CMD) prints one JSON object on stdout.
 
 Exit status: 0 ok; 1 the condition did not hold (exited, not ready in time, already
 started, unknown name, port in use, who: port free); 2 invalid input, or CMD cannot be
@@ -43,8 +43,8 @@ start: ready checks, ports and the supervisor
   exit status and does the stopping. When the command exits on its own, what is left of
   its group is stopped too, so do not background the server inside CMD
   (`sh -c 'server &'`). A single quoted CMD with spaces ("npm run dev") is run with sh -c.
-  Everything after `--` is the command's own: `start web -- npx vite --help` gives
-  --help to vite, not to devsrv.
+  Everything from CMD on is the command's own: `start web -- npx vite --help` (or
+  `start web npx vite --help`) gives --help to vite, not to devsrv.
 
 stop: what it stops
   stop sends TERM to the command's process group, waits up to 5s, then KILL. A child
