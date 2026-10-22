@@ -536,6 +536,25 @@ fn url(text: &str) -> Result<WaitTarget, Failure> {
     })
 }
 
+/// An option that `wait` reads (`--timeout 5`, `-t5`, `--status=200`, `--json`).
+fn is_wait_option(arg: &str) -> bool {
+    let (k, _) = split_opt(arg);
+    [
+        "--",
+        "--timeout",
+        "-t",
+        "--interval",
+        "--every",
+        "-i",
+        "--status",
+        "-s",
+        "--json",
+        "-h",
+        "--help",
+    ]
+    .contains(&k.as_str())
+}
+
 fn wait(a: &mut Args) -> Result<Cmd, Failure> {
     let sub = a.sub;
     let (mut target, mut t, mut interval) = (None, DEFAULT_TIMEOUT, None);
@@ -612,9 +631,10 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
             }
             "file" => {
                 let path = a.value(&k, inline)?.into();
-                // An optional pattern: the next argument, unless it is an option.
+                // An optional pattern: the next argument, unless it is an option of wait
+                // (`200` and `-->` are patterns).
                 let pattern = match a.peek() {
-                    Some(p) if !p.starts_with('-') && p.parse::<u16>().is_err() => {
+                    Some(p) if !is_wait_option(p) => {
                         let p = a.next().expect("peeked");
                         Some(regex(sub, &p)?)
                     }

@@ -1675,3 +1675,21 @@ fn ls_shows_a_broken_record_as_a_row_and_the_others_too() {
         .collect();
     assert_eq!(states, ["broken", "dead"]);
 }
+
+#[test]
+fn wait_file_takes_a_number_or_a_dash_after_the_path_as_the_pattern() {
+    let env = Env::new();
+    let dir = env.projects[0].path();
+    std::fs::write(dir.join("a.log"), "GET / 404\nGET / 200\n").unwrap();
+    std::fs::write(dir.join("b.html"), "<p>\n<!-- end -->\n").unwrap();
+    let r = env.run(&["wait", "file", "a.log", "200", "-t", "2"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.ends_with(": GET / 200\n"), "{}", r.stdout);
+    let r = env.run(&["wait", "-t", "2", "file", "b.html", "-->"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.ends_with(": <!-- end -->\n"), "{}", r.stdout);
+    // An option of wait is still an option.
+    let r = env.run(&["wait", "file", "a.log", "--timeout=2"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.ends_with(": a.log\n"), "{}", r.stdout);
+}

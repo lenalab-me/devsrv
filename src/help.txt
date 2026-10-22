@@ -77,6 +77,8 @@ wait: wait for a condition
                     exist yet. It is read from its start, then only what is added, so a
                     line left by an earlier run counts too: write to a new file, or match
                     what only this run prints. On a timeout, the end of the file is shown.
+                    What follows PATH is REGEX unless it is an option of wait: 200 or -->
+                    is a pattern.
   log NAME REGEX    a line of NAME's log, from the start of its current run; fails at
                     once when NAME has exited.
   gone PID          the process has exited.
