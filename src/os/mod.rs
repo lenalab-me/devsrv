@@ -1,10 +1,12 @@
 //! Everything that differs between macOS and Linux, and every syscall that can hurt.
 //!
 //! Invariant: `libc::kill` appears once in this crate, in `OwnedGroup::signal`, and its
-//! target is always a process group that devsrv proved to be its own.
+//! target is always a process group that devsrv proved to be its own: the command of a
+//! supervisor, a run of `wait cmd` (`Foreground`), or a verified orphan.
 
 use std::io;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::model::{ProcRef, StartTime};
@@ -181,6 +183,114 @@ impl Child {
         } else {
             ExitStatus::Unknown
         }
+    }
+}
+
+/// One run of a command in the foreground of devsrv (`wait cmd`): a `Child` in its own
+/// group, which neither the run's own end nor the end of devsrv leaves behind. When it
+/// ends, what is left of its group is killed before it is reaped. When TERM, INT or HUP
+/// comes for devsrv (a caller that kills devsrv's group does not reach the run's), the
+/// group of the run is killed, and devsrv then ends by that signal.
+pub struct Foreground {
+    child: Child,
+}
+
+/// The pid of the run in the foreground; -1 while one is being spawned, 0 when none is.
+static RUNNING: AtomicI32 = AtomicI32::new(0);
+/// TERM, INT or HUP that came while a run was in the foreground.
+static PENDING: AtomicI32 = AtomicI32::new(0);
+const ENDING: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
+
+/// With no run, ends devsrv at once; with one, leaves that to the loop that watches it,
+/// which kills the run's group first.
+extern "C" fn on_ending_signal(sig: libc::c_int) {
+    if RUNNING.load(Ordering::SeqCst) == 0 {
+        die(sig);
+    }
+    PENDING.store(sig, Ordering::SeqCst);
+}
+
+/// Ends this process by `sig`, as if it had no handler for it.
+fn die(sig: libc::c_int) -> ! {
+    // SAFETY: async-signal-safe calls only (this also runs in a signal handler); the set
+    // is initialized by sigemptyset before use.
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, sig);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(sig);
+        libc::_exit(128 + sig)
+    }
+}
+
+/// Handles TERM, INT and HUP from now on; one that was ignored (nohup) stays ignored.
+fn handle_ending_signals() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for sig in ENDING {
+            // SAFETY: an all-zero sigaction is valid; the handler only touches atomics and
+            // calls async-signal-safe functions.
+            unsafe {
+                let mut act: libc::sigaction = std::mem::zeroed();
+                act.sa_sigaction = on_ending_signal as *const () as libc::sighandler_t;
+                act.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut act.sa_mask);
+                let mut old: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(sig, &act, &mut old);
+                if old.sa_sigaction == libc::SIG_IGN {
+                    libc::sigaction(sig, &old, std::ptr::null_mut());
+                }
+            }
+        }
+    });
+}
+
+impl Foreground {
+    /// Spawns `cmd` in its own process group.
+    pub fn spawn(cmd: &mut std::process::Command) -> io::Result<Foreground> {
+        use std::os::unix::process::CommandExt;
+        handle_ending_signals();
+        RUNNING.store(-1, Ordering::SeqCst);
+        let spawned = cmd.process_group(0).spawn();
+        let child = spawned.map(Child::adopt);
+        RUNNING.store(child.as_ref().map_or(0, |c| c.pid()), Ordering::SeqCst);
+        let run = child.map(|child| Foreground { child });
+        match &run {
+            Ok(r) => r.end_if_asked(),
+            Err(_) => Self::end_now_if_asked(),
+        }
+        run
+    }
+
+    fn end_now_if_asked() {
+        let sig = PENDING.load(Ordering::SeqCst);
+        if sig != 0 {
+            die(sig);
+        }
+    }
+
+    fn end_if_asked(&self) {
+        if PENDING.load(Ordering::SeqCst) != 0 {
+            self.child.group().signal(libc::SIGKILL);
+            Self::end_now_if_asked();
+        }
+    }
+
+    /// Has the run exited? It is not reaped, so its group id stays its own.
+    pub fn exited(&self) -> bool {
+        self.end_if_asked();
+        self.child.exited()
+    }
+
+    /// Kills what is left of the run's group (all of it, at the deadline), then reaps it.
+    pub fn finish(self) -> ExitStatus {
+        self.child.group().signal(libc::SIGKILL);
+        RUNNING.store(0, Ordering::SeqCst);
+        // A signal that came before the store: the group is gone already.
+        Self::end_now_if_asked();
+        self.child.reap()
     }
 }
 

@@ -79,10 +79,11 @@ wait: wait for a condition
                     once when NAME has exited.
   gone PID          the process has exited.
   cmd -- CMD ARGS   CMD exits 0. Each run has no stdin and its own process group, which
-                    is killed at the deadline. On a timeout, the exit status and output of
-                    the last run that finished are shown. Everything after `--` is the
-                    command's, so put --timeout before `cmd`. One quoted line with spaces
-                    runs with sh -c and may be followed by options:
+                    is killed when the run ends, at the deadline, or when devsrv wait is
+                    killed: nothing a run starts outlives it. On a timeout, the exit
+                    status and output of the last run that finished are shown. All after
+                    `--` is the command's, so put --timeout before `cmd`. One quoted line
+                    with spaces runs with sh -c and may be followed by options:
                     wait cmd 'curl -sf URL | grep ok' --timeout 1m. A CMD that is not on
                     PATH fails at once (exit 2); a path (./bin/app) may appear later.
   It also takes --port N, --file PATH [REGEX], --log NAME REGEX, --gone PID, --cmd and a

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use regex_lite::Regex;
 
-use crate::os::{Lookup, proc_info};
+use crate::os::{ExitStatus, Foreground, Lookup, proc_info};
 
 /// The HTTP statuses that count as ready: ranges, both ends included.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +61,8 @@ pub enum Condition {
         pattern: Regex,
     },
     File(PathBuf),
-    /// The command exits 0. Each run is killed, with its process group, at the deadline.
+    /// The command exits 0. The process group of each run is killed when the run ends,
+    /// and at the deadline.
     Cmd(Vec<String>),
     /// The process is gone: no longer there, a zombie, or its pid was reused.
     Gone {
@@ -334,47 +335,40 @@ pub fn shown(argv: &[String]) -> String {
 }
 
 /// One run of a check command. Its output goes to an unlinked file, not a pipe, so a
-/// child it leaves behind cannot keep the read open. At the deadline its process group
-/// is killed while the leader is still unreaped, so the group id cannot have been reused.
+/// child it leaves behind cannot keep the read open. When the run ends, or at the
+/// deadline, its process group is killed while the leader is still unreaped, so the group
+/// id cannot have been reused; nothing of one run is left for the next.
 /// The error is "exit 1" (or so), then the last lines of the output, one per line.
 fn run_once(argv: &[String], deadline: Instant) -> Result<Met, String> {
-    use std::os::unix::process::{CommandExt, ExitStatusExt};
     let mut out = scratch().map_err(|e| format!("cannot make a file for the output: {e}"))?;
     let (o, e) = match (out.try_clone(), out.try_clone()) {
         (Ok(o), Ok(e)) => (o, e),
         (Err(x), _) | (_, Err(x)) => return Err(format!("cannot make a file for the output: {x}")),
     };
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stdout(o)
-        .stderr(e)
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("cannot run it: {e}"))?;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) => {}
-            Err(e) => return Err(format!("cannot watch it: {e}")),
+    let run = Foreground::spawn(
+        Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(o)
+            .stderr(e),
+    )
+    .map_err(|e| format!("cannot run it: {e}"))?;
+    let cut = loop {
+        if run.exited() {
+            break false;
         }
         let now = Instant::now();
         if now >= deadline {
-            // SAFETY: kill(2) with the group id of our unreaped child; no memory involved.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-            let _ = child.wait();
-            break None;
+            break true;
         }
         std::thread::sleep(Duration::from_millis(10).min(deadline - now));
     };
-    let mut text = match status {
-        Some(s) if s.success() => return Ok(Met::new(format!("`{}` exited 0", shown(argv)))),
-        Some(s) => match (s.code(), s.signal()) {
-            (Some(c), _) => format!("exit {c}"),
-            (_, Some(n)) => format!("killed by signal {n}"),
-            _ => "ended".into(),
-        },
-        None => CUT.into(),
+    let mut text = match run.finish() {
+        _ if cut => CUT.into(),
+        ExitStatus::Code(0) => return Ok(Met::new(format!("`{}` exited 0", shown(argv)))),
+        ExitStatus::Code(c) => format!("exit {c}"),
+        ExitStatus::Signal(n) => format!("killed by signal {n}"),
+        ExitStatus::Unknown => "ended".into(),
     };
     let (lines, _) = tail_of(&mut out, CMD_TAIL);
     for l in lines {

@@ -1447,3 +1447,83 @@ fn wait_cmd_not_on_path_fails_at_once_but_a_path_is_waited_for() {
         r.stderr
     );
 }
+
+/// The pids a file lists, one per line.
+fn pids_in(path: &Path) -> Vec<u32> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
+#[test]
+fn wait_cmd_leaves_nothing_of_a_run_that_ended() {
+    let env = Env::new();
+    let dir = env.projects[0].path();
+    // Every run fails and leaves a child behind; each child goes with its run.
+    let r = env.run(&[
+        "wait",
+        "--timeout",
+        "1200ms",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "sleep 300 & echo $! >> failed.pids; exit 1",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    // The run that succeeds, too.
+    let r = env.run(&[
+        "wait",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "sleep 300 & echo $! > ok.pids; true",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let failed = pids_in(&dir.join("failed.pids"));
+    assert!(failed.len() >= 2, "{failed:?}");
+    for pid in failed.into_iter().chain(pids_in(&dir.join("ok.pids"))) {
+        assert!(
+            eventually(Duration::from_secs(2), || !pid_alive(pid)),
+            "pid {pid}, left by a run, is still alive"
+        );
+    }
+}
+
+#[test]
+fn wait_cmd_killed_by_its_caller_takes_the_running_command_along() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let env = Env::new();
+    let dir = env.projects[0].path();
+    for (sig, n) in [("TERM", 15), ("INT", 2), ("HUP", 1)] {
+        let file = dir.join(format!("{sig}.pid"));
+        let line = format!("echo $$ > {sig}.pid; sleep 300");
+        // As a tool call that times out does: the signal goes to the whole group of the
+        // caller, which the run, in its own group, is not in.
+        let mut waiting = Command::new(env!("CARGO_BIN_EXE_devsrv"))
+            .args(["wait", "--timeout", "1m", "cmd", "--", "sh", "-c", &line])
+            .current_dir(dir)
+            .env("DEVSRV_STATE_DIR", env.state.path())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        assert!(
+            eventually(Duration::from_secs(5), || !pids_in(&file).is_empty()),
+            "{sig}: the run did not start"
+        );
+        let run = pids_in(&file)[0];
+        Command::new("kill")
+            .args([&format!("-{sig}"), "--", &format!("-{}", waiting.id())])
+            .status()
+            .unwrap();
+        let status = waiting.wait().unwrap();
+        assert_eq!(status.signal(), Some(n), "{sig}: {status:?}");
+        assert!(
+            eventually(Duration::from_secs(2), || !pid_alive(run)),
+            "{sig}: the run {run} outlived devsrv wait"
+        );
+    }
+}
