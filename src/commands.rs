@@ -170,10 +170,7 @@ fn already_started(inst: &Instance) -> Failure {
 
 /// A fixed port that already accepts connections, or cannot be bound, is in use.
 fn port_in_use(port: u16) -> bool {
-    let probe = |a: SocketAddr| TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok();
-    probe(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
-        || probe(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))
-        || TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+    answers(port) || TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
 }
 
 fn owner_text(pid: i32) -> String {
@@ -954,20 +951,63 @@ pub fn stop(names: Vec<Name>, all: bool) -> Result<Output, Failure> {
     }
 }
 
+/// Does something accept connections on the port, on 127.0.0.1 or ::1?
+fn answers(port: u16) -> bool {
+    let probe = |a: SocketAddr| TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok();
+    probe(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        || probe(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)))
+}
+
+/// Who holds a port, as far as devsrv can see.
+#[derive(Debug, PartialEq)]
+enum Holders {
+    Seen(Vec<i32>),
+    /// Something listens, but its owner is not visible (another user's, root's).
+    Hidden,
+    Free,
+}
+
+/// The listeners the OS shows; when it shows none, a port that still answers is held by
+/// a process devsrv cannot see (macOS's lsof lists only the caller's own), not free.
+fn holders(
+    seen: std::io::Result<Vec<i32>>,
+    answers: impl FnOnce() -> bool,
+) -> std::io::Result<Holders> {
+    match seen {
+        Ok(p) if !p.is_empty() => Ok(Holders::Seen(p)),
+        Ok(_) if answers() => Ok(Holders::Hidden),
+        Ok(_) => Ok(Holders::Free),
+        // Linux: a listening socket whose process is not readable.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(Holders::Hidden),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn who(port: u16) -> Result<Output, Failure> {
     let store = Store::open()?;
-    let pids = os::tcp_listeners(port).map_err(|e| {
+    let found = holders(os::tcp_listeners(port), || answers(port)).map_err(|e| {
         Failure::system(format!("cannot tell who listens on port {port}: {e}"))
             .hint("on macOS devsrv uses /usr/sbin/lsof; on Linux, /proc")
     })?;
-    if pids.is_empty() {
-        return Err(Failure::new(
-            NOT_MET,
-            "free",
-            format!("{port}: free (nothing listens on it)"),
-        )
-        .data(json!({ "port": port, "listeners": [] })));
-    }
+    let pids = match found {
+        Holders::Seen(p) => p,
+        Holders::Hidden => {
+            return Ok(Output::new(
+                format!(
+                    "{port}: in use by a process devsrv cannot see (another user's, or root's; devsrv will not stop it)\n"
+                ),
+                json!({ "port": port, "listeners": [], "hidden": true }),
+            ));
+        }
+        Holders::Free => {
+            return Err(Failure::new(
+                NOT_MET,
+                "free",
+                format!("{port}: free (nothing listens on it)"),
+            )
+            .data(json!({ "port": port, "listeners": [] })));
+        }
+    };
     // Live devsrv processes, by the pgid their command leads.
     let mut ours = Vec::new();
     for p in store.projects() {
@@ -1219,4 +1259,25 @@ fn on_path(name: &str) -> bool {
                 .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn a_port_that_answers_with_no_owner_in_sight_is_not_free() {
+        let none = || Ok(vec![]);
+        assert_eq!(holders(none(), || true).unwrap(), Holders::Hidden);
+        assert_eq!(holders(none(), || false).unwrap(), Holders::Free);
+        assert_eq!(
+            holders(Ok(vec![7]), || panic!("not asked")).unwrap(),
+            Holders::Seen(vec![7])
+        );
+        // Linux says so itself: the socket is there, its process cannot be read.
+        let denied = Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(holders(denied, || false).unwrap(), Holders::Hidden);
+        assert!(holders(Err(io::Error::other("lsof")), || true).is_err());
+    }
 }

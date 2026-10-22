@@ -1527,3 +1527,32 @@ fn wait_cmd_killed_by_its_caller_takes_the_running_command_along() {
         );
     }
 }
+
+/// A port held by a process devsrv cannot see (root's sshd, here when it runs) is not
+/// free. The logic is also checked without one, in the unit tests of `holders`.
+#[test]
+fn who_does_not_call_a_port_free_that_answers() {
+    let env = Env::new();
+    let answering = [22u16, 88, 445].into_iter().find(|&p| {
+        TcpStream::connect_timeout(&([127, 0, 0, 1], p).into(), Duration::from_millis(200)).is_ok()
+    });
+    if let Some(p) = answering {
+        let r = env.run(&["who", &p.to_string()]);
+        assert_eq!(r.code, 0, "{}{}", r.stdout, r.stderr);
+        assert!(!r.stdout.contains("free"), "{}", r.stdout);
+    } else {
+        eprintln!("no system port answers here; only the free side is checked");
+    }
+    let free = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let r = env.run(&["who", &free.to_string()]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.contains(": free (nothing listens on it)"),
+        "{}",
+        r.stderr
+    );
+}

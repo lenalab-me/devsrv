@@ -132,7 +132,7 @@ devsrv start（エージェントのシェル）       devsrv __supervise（切�
 
 ### who
 
-macOS は `lsof -nP -iTCP:PORT -sTCP:LISTEN -Fp`（3 秒の期限）、Linux は `/proc/net/tcp{,6}` と `/proc/<pid>/fd`。見つけた PID の pgid を、すべてのプロジェクトの生きている記録の子と照らし、devsrv の名前か、PID とコマンドかを出す。止めない。
+macOS は `lsof -nP -iTCP:PORT -sTCP:LISTEN -Fp`（3 秒の期限）、Linux は `/proc/net/tcp{,6}` と `/proc/<pid>/fd`。見つけた PID の pgid を、すべてのプロジェクトの生きている記録の子と照らし、devsrv の名前か、PID とコマンドかを出す。止めない。持ち主が 1 つも見えないとき、「空き」と言う前に 127.0.0.1 と ::1 につないでみる。macOS の `lsof` は root やほかのユーザーのプロセスを出さないので、見えないだけで使われているポートがある。つながったら「devsrv から見えないプロセスが使っている」と出して終了 0。Linux で待ち受けのソケットはあるのに持ち主のプロセスが読めないときも同じ答えにし、OS で答えが割れないようにする。
 
 ### 出力と終了コード
 

@@ -61,7 +61,8 @@ logs: the log of one name
 
 who: who listens on a port
   who PORT names the process that listens, and the devsrv name if devsrv started it.
-  It never stops anything. Exit status 1 when the port is free.
+  It never stops anything. Exit status 1 when the port is free. A port that answers but
+  whose owner devsrv cannot see (root's, another user's) is said to be so, exit 0.
 
 wait: wait for a condition
   wait checks at once, then every 50ms (cmd: every 0.5s; --interval sets it), until the
