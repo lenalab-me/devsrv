@@ -254,7 +254,9 @@ fn addrs(host: &Option<String>, port: u16) -> Vec<SocketAddr> {
     match host {
         Some(h) => {
             use std::net::ToSocketAddrs;
-            (h.as_str(), port)
+            // `[::1]` is written with brackets; the resolver takes the address alone.
+            let h = h.trim_start_matches('[').trim_end_matches(']');
+            (h, port)
                 .to_socket_addrs()
                 .map(|a| a.collect())
                 .unwrap_or_default()

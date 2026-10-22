@@ -1693,3 +1693,41 @@ fn wait_file_takes_a_number_or_a_dash_after_the_path_as_the_pattern() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(r.stdout.ends_with(": a.log\n"), "{}", r.stdout);
 }
+
+/// What a server on ::1 is sent by `wait URL`: the request line and the Host header.
+#[test]
+fn wait_sends_a_valid_request_to_an_ipv6_url_with_a_query() {
+    let env = Env::new();
+    let server = TcpListener::bind("[::1]:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let seen = std::thread::spawn(move || {
+        let (mut s, _) = server.accept().unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !buf.ends_with(b"\r\n\r\n") {
+            let n = s.read(&mut chunk).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        s.write_all(b"HTTP/1.0 200 OK\r\n\r\n").unwrap();
+        String::from_utf8(buf).unwrap()
+    });
+    let url = format!("http://[::1]:{port}/?x=1#top");
+    let r = env.run(&["wait", &url, "--status", "200", "-t", "5"]);
+    let request = seen.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        r.stdout
+            .contains(&format!("http://[::1]:{port}/?x=1 (HTTP 200)")),
+        "{}",
+        r.stdout
+    );
+    assert!(request.starts_with("GET /?x=1 HTTP/1.0\r\n"), "{request}");
+    assert!(
+        request.contains(&format!("\r\nHost: [::1]:{port}\r\n")),
+        "{request}"
+    );
+}

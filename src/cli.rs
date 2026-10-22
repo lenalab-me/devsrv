@@ -57,6 +57,7 @@ pub struct StartArgs {
 
 pub enum WaitTarget {
     Url {
+        /// As it goes in a URL: an IPv6 address in brackets.
         host: String,
         port: u16,
         path: String,
@@ -515,21 +516,45 @@ fn url(text: &str) -> Result<WaitTarget, Failure> {
             "https:// is not supported; wait for the port instead (wait port N)",
         ));
     }
+    let invalid = || bad("wait", format!("invalid URL `{text}`"));
     let rest = text.strip_prefix("http://").unwrap_or(text);
-    let (hostport, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], rest[i..].to_string()),
-        None => (rest, "/".to_string()),
+    // The host ends at the path, the query or the fragment; the fragment is not sent.
+    let (hostport, path) = match rest.find(['/', '?', '#']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
     };
-    let (host, p) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (h, port("wait", p)?),
-        None => (hostport, 80),
+    let path = path.split('#').next().unwrap_or("");
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
     };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
-        return Err(bad("wait", format!("invalid URL `{text}`")));
-    }
+    // `[::1]:8080`: an IPv6 host keeps its brackets, as it goes in a URL and in `Host:`.
+    let (host, p) = match hostport.strip_prefix('[') {
+        Some(v6) => {
+            let (ip, after) = v6.split_once(']').ok_or_else(invalid)?;
+            if ip.parse::<std::net::Ipv6Addr>().is_err() {
+                return Err(invalid());
+            }
+            let p = match after {
+                "" => 80,
+                _ => port("wait", after.strip_prefix(':').ok_or_else(invalid)?)?,
+            };
+            (format!("[{ip}]"), p)
+        }
+        None => {
+            let (h, p) = match hostport.rsplit_once(':') {
+                Some((h, p)) => (h, port("wait", p)?),
+                None => (hostport, 80),
+            };
+            if h.is_empty() || h.contains([']', ':', '@']) {
+                return Err(invalid());
+            }
+            (h.to_string(), p)
+        }
+    };
     Ok(WaitTarget::Url {
-        host: host.to_string(),
+        host,
         port: p,
         path,
         statuses: None,
@@ -796,6 +821,45 @@ mod tests {
             })
         ));
         assert_eq!(p("wait https://x").err().map(|f| f.code), Some(2));
+    }
+
+    #[test]
+    fn wait_urls() {
+        let url = |s: &str| match p(&format!("wait {s}")) {
+            Ok(Cmd::Wait {
+                target: WaitTarget::Url {
+                    host, port, path, ..
+                },
+                ..
+            }) => (host, port, path),
+            Ok(_) => panic!("{s}: not a URL"),
+            Err(f) => panic!("{s}: {}", f.text()),
+        };
+        let want = |h: &str, port: u16, path: &str| (h.to_string(), port, path.to_string());
+        assert_eq!(url("http://[::1]/"), want("[::1]", 80, "/"));
+        assert_eq!(
+            url("http://[::1]:8080/x?y=1"),
+            want("[::1]", 8080, "/x?y=1")
+        );
+        assert_eq!(url("http://127.0.0.1:9?x=1"), want("127.0.0.1", 9, "/?x=1"));
+        assert_eq!(
+            url("http://localhost:3000/a#top"),
+            want("localhost", 3000, "/a")
+        );
+        assert_eq!(url("http://h#top"), want("h", 80, "/"));
+        for bad in [
+            "http://[::1",
+            "http://[zz]:1/",
+            "http://[::1]x/",
+            "http://:1/",
+            "http://::1/",
+        ] {
+            assert_eq!(
+                p(&format!("wait {bad}")).err().map(|f| f.code),
+                Some(2),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
