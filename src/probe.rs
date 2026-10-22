@@ -308,6 +308,15 @@ fn first_answer<T>(
     Err(seen)
 }
 
+/// The host, as it goes in a URL, that accepts a connection on the port: 127.0.0.1, then
+/// ::1. For a readiness that did not connect (a log line), to say where the server is.
+pub fn answering_host(port: u16) -> Option<String> {
+    let cond = Condition::Port { host: None, port };
+    check(&cond, Instant::now() + Duration::from_millis(500))
+        .ok()?
+        .host
+}
+
 /// One HTTP/1.0 GET; the status code, or what went wrong.
 fn http_status(
     addr: &SocketAddr,

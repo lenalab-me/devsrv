@@ -1812,3 +1812,47 @@ fn stop_all_stops_this_project_only_as_the_help_says() {
     let summary = env.run(&["--help"]).stdout;
     assert!(summary.contains("(--all: in this project)"), "{summary}");
 }
+
+#[test]
+fn a_log_ready_server_on_ipv6_only_gets_the_address_that_answers() {
+    let env = Env::new();
+    let r = env.run(&[
+        "start",
+        "v6",
+        "--port",
+        "auto",
+        "--ready",
+        "log:Serving HTTP",
+        "--",
+        "python3",
+        "-u",
+        "-m",
+        "http.server",
+        "--bind",
+        "::1",
+        "{port}",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let address = r.stdout.trim();
+    assert!(address.starts_with("[::1]:"), "{address}");
+    TcpStream::connect(address).unwrap();
+    // A server on 127.0.0.1 is still at 127.0.0.1.
+    let r = env.run(&[
+        "start",
+        "v4",
+        "--port",
+        "auto",
+        "--ready",
+        "log:Serving HTTP",
+        "--",
+        "python3",
+        "-u",
+        "-m",
+        "http.server",
+        "--bind",
+        "127.0.0.1",
+        "{port}",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("127.0.0.1:"), "{}", r.stdout);
+}

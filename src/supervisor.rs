@@ -282,9 +282,14 @@ fn supervise(claim: &Claim, spec: &Spec) -> Result<(), String> {
                     return finish(child, Cause::PortTaken { owners });
                 }
             }
+            // A log line or a moment does not say which address answers: one look at the
+            // port does (a server on ::1 only is not at 127.0.0.1).
+            let host = met
+                .host
+                .or_else(|| spec.port.and_then(probe::answering_host));
             let info = ReadyInfo {
                 waited_ms: waited.as_millis() as u64,
-                address: address(spec, child.pid(), met.host.as_deref()),
+                address: address(spec, child.pid(), host.as_deref()),
             };
             if let Err(e) = claim.write(&up(Some(info))) {
                 let _ = finish(child, Cause::OnItsOwn);
