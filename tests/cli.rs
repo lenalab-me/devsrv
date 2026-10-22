@@ -1888,3 +1888,22 @@ fn wait_status_refuses_1xx() {
         assert!(r.stderr.contains("codes from 200 to 599"), "{}", r.stderr);
     }
 }
+
+/// The README says how to get the code and which Rust it needs, as Cargo.toml says.
+#[test]
+fn the_readme_says_how_to_install_with_the_rust_cargo_toml_needs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let version = manifest
+        .lines()
+        .find_map(|l| l.strip_prefix("rust-version = "))
+        .unwrap()
+        .trim_matches('"');
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    assert!(
+        readme.contains(&format!("Rust {version} 以上")),
+        "rust-version {version}"
+    );
+    assert!(readme.contains("git clone https://github.com/lenalab-me/devsrv.git"));
+    assert!(readme.contains("cargo install --locked --path ."));
+}

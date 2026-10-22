@@ -4,8 +4,15 @@
 
 個人で作り、Claude Code と Codex の作業で使っている。動くのは macOS と Linux（Windows なら WSL2）。ほかの自作の道具（[rpatch](https://github.com/lenalab-me/rpatch)・[agentlog](https://github.com/lenalab-me/agentlog)）やスキルとまとめて入れる手順は、[harness-engineering の SETUP.md](https://github.com/lenalab-me/harness-engineering/blob/main/SETUP.md) にある。
 
+入れるには Rust 1.88 以上（`rustup` で入る `cargo`）が要る。
+
 ```sh
-cargo install --locked --path .
+git clone https://github.com/lenalab-me/devsrv.git
+cd devsrv
+cargo install --locked --path .     # ~/.cargo/bin/devsrv に入る
+```
+
+```sh
 devsrv start web --port auto -- python3 -m http.server {port}   # → http://127.0.0.1:52144/
 devsrv ls
 devsrv logs web -n 20
