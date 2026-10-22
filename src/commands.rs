@@ -548,12 +548,25 @@ pub fn ls(all: bool) -> Result<Output, Failure> {
     let projects: Vec<Project> = if all { store.projects() } else { vec![here] };
     let mut text = String::new();
     let mut items = Vec::new();
+    // A record that cannot be read is a row of its own: the others are still shown.
+    let mut broken: Vec<Failure> = Vec::new();
     for p in &projects {
         let mut rows = Vec::new();
         let (mut alive, mut dead) = (0, 0);
         for inst in p.instances() {
-            let Some((record, status)) = inst.status()? else {
-                continue;
+            let (record, status) = match inst.status() {
+                Ok(Some(found)) => found,
+                Ok(None) => continue,
+                Err(f) => {
+                    rows.push(format!(
+                        "{:<12} {:<8}  its record cannot be read (stderr says why)",
+                        inst.name.as_str(),
+                        "broken",
+                    ));
+                    items.push(json!({ "name": inst.name.as_str(), "state": "broken", "dir": p.scope.path(), "error": f.message }));
+                    broken.push(f);
+                    continue;
+                }
             };
             if self::alive(&record, status) {
                 alive += 1;
@@ -573,8 +586,14 @@ pub fn ls(all: bool) -> Result<Output, Failure> {
             ));
             continue;
         }
+        let bad = rows.len() - alive - dead;
         text.push_str(&format!(
-            "{alive} running, {dead} dead in {}\n",
+            "{alive} running, {dead} dead{} in {}\n",
+            if bad > 0 {
+                format!(", {bad} broken")
+            } else {
+                String::new()
+            },
             p.scope.path().display()
         ));
         text.push_str(&format!(
@@ -589,7 +608,13 @@ pub fn ls(all: bool) -> Result<Output, Failure> {
     if text.is_empty() {
         text = "nothing started\n".into();
     }
-    Ok(Output::new(text, json!({ "processes": items })))
+    let out = Output::new(text, json!({ "processes": items }));
+    if broken.is_empty() {
+        return Ok(out);
+    }
+    Ok(out
+        .note(broken.iter().map(|f| f.text()).collect::<String>())
+        .code(SYSTEM))
 }
 
 fn known(inst: &Instance) -> Result<(Record, Status), Failure> {

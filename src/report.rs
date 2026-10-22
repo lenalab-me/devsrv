@@ -12,11 +12,13 @@ pub const USAGE: u8 = 2;
 /// devsrv could not do its job: state directory, broken record, the OS did not answer.
 pub const SYSTEM: u8 = 3;
 
-/// A successful result: the human text and the JSON say the same thing.
+/// A result: the human text and the JSON say the same thing. Successful, unless `code`
+/// says that a part of it could not be made (a listing with a broken record in it).
 pub struct Output {
     pub stdout: String,
     pub stderr: String,
     pub json: Value,
+    pub code: u8,
 }
 
 impl Output {
@@ -25,10 +27,15 @@ impl Output {
             stdout: stdout.into(),
             stderr: String::new(),
             json,
+            code: OK,
         }
     }
     pub fn note(mut self, stderr: impl Into<String>) -> Output {
         self.stderr = stderr.into();
+        self
+    }
+    pub fn code(mut self, code: u8) -> Output {
+        self.code = code;
         self
     }
 }
@@ -101,13 +108,16 @@ impl Failure {
 pub fn emit(result: Result<Output, Failure>, as_json: bool) -> u8 {
     use std::io::Write;
     let (out, err, code) = match (result, as_json) {
-        (Ok(o), false) => (o.stdout, o.stderr, OK),
+        (Ok(o), false) => (o.stdout, o.stderr, o.code),
         (Ok(o), true) => {
             let mut v = o.json;
             if let Value::Object(m) = &mut v {
-                m.insert("ok".into(), Value::Bool(true));
+                m.insert("ok".into(), Value::Bool(o.code == OK));
+                if o.code != OK {
+                    m.insert("exit_code".into(), o.code.into());
+                }
             }
-            (format!("{v}\n"), String::new(), OK)
+            (format!("{v}\n"), String::new(), o.code)
         }
         (Err(f), false) => (String::new(), f.text(), f.code),
         (Err(f), true) => (format!("{}\n", f.json()), String::new(), f.code),

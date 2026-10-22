@@ -53,7 +53,8 @@ stop: what it stops
 
 ls: what devsrv started
   One line per name: state, pid, port, age and the directory. ls shows this git top
-  level (or directory); --all shows every one.
+  level (or directory); --all shows every one. A record that cannot be read is a
+  `broken` line (why, on stderr): the others are still shown, and the exit status is 3.
 
 logs: the log of one name
   logs NAME prints the last -n lines (50). --follow-until REGEX waits for a line that

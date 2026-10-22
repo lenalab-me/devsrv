@@ -1613,3 +1613,65 @@ fn wait_file_reads_what_is_written_and_a_line_written_in_two_parts_whole() {
     writer.join().unwrap();
     assert_eq!(r.code, 0, "{}", r.stderr);
 }
+
+#[test]
+fn ls_shows_a_broken_record_as_a_row_and_the_others_too() {
+    let mut env = Env::new();
+    let other = env.add_project();
+    // Each ends at once: dead records, nothing left running.
+    env.run(&["start", "bad", "--", "sh", "-c", "exit 0"]);
+    env.run(&["start", "good", "--", "sh", "-c", "exit 0"]);
+    env.run_in(other, &["start", "far", "--", "sh", "-c", "exit 0"]);
+    let path = std::fs::read_dir(env.state.path())
+        .unwrap()
+        .map(|e| e.unwrap().path().join("bad").join("record.json"))
+        .find(|p| p.exists())
+        .unwrap();
+    std::fs::write(&path, "{ not json").unwrap();
+    for all in [false, true] {
+        let mut args = vec!["ls"];
+        if all {
+            args.push("--all");
+        }
+        let r = env.run(&args);
+        assert_eq!(r.code, 3, "{}", r.stderr);
+        assert!(r.stdout.contains("1 dead, 1 broken in"), "{}", r.stdout);
+        assert!(
+            r.stdout.lines().any(|l| l.starts_with("good ")),
+            "{}",
+            r.stdout
+        );
+        assert!(
+            r.stdout
+                .lines()
+                .any(|l| l.starts_with("bad ") && l.contains("broken")),
+            "{}",
+            r.stdout
+        );
+        assert_eq!(r.stdout.contains("far "), all, "{}", r.stdout);
+        assert!(
+            r.stderr.contains("the record of bad is broken"),
+            "{}",
+            r.stderr
+        );
+        assert!(
+            r.stderr.contains("hint: if nothing of it runs"),
+            "{}",
+            r.stderr
+        );
+    }
+    let r = env.run(&["--json", "ls"]);
+    assert_eq!(r.code, 3);
+    let v: Value = serde_json::from_str(&r.stdout).unwrap();
+    assert_eq!(
+        (v["ok"].clone(), v["exit_code"].clone()),
+        (false.into(), 3.into())
+    );
+    let states: Vec<&str> = v["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["state"].as_str().unwrap())
+        .collect();
+    assert_eq!(states, ["broken", "dead"]);
+}
