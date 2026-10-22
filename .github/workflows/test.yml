@@ -1,6 +1,5 @@
 name: Test
-# Manual only: macOS runners use private-repo minutes at 10x.
-# Run with `gh workflow run test.yml`.
+# Manual only: run with `gh workflow run test.yml`.
 on:
   workflow_dispatch:
 permissions:

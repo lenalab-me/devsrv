@@ -20,7 +20,7 @@ devsrv wait http://127.0.0.1:52144/ --timeout 10
 devsrv wait http://127.0.0.1:52144/app.js --status 200           # 404 のあいだは待つ
 devsrv wait file build.log 'compiled|error'                      # ファイルがまだなくても待つ
 devsrv wait --timeout 2m cmd -- pg_isready -q                    # 0 で終わるまで、0.5 秒ごとに走らせる
-devsrv who 8765                                                  # 持ち主を見るだけで、止めない
+devsrv who 8000                                                  # 持ち主を見るだけで、止めない
 devsrv stop web
 ```
 

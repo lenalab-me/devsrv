@@ -37,8 +37,8 @@ $ devsrv stop web
 web: already stopped (4s ago)
 [exit 0]
 
-$ devsrv who 8765
-8765: pid 911 python3 tools/log-analysis/dashboard.py (not started by devsrv; devsrv will not stop it)
+$ devsrv who 8000
+8000: pid 911 python3 -m http.server 8000 (not started by devsrv; devsrv will not stop it)
 [exit 0]
 
 $ devsrv wait port 29999 --timeout 1

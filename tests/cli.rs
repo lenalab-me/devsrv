@@ -1907,3 +1907,18 @@ fn the_readme_says_how_to_install_with_the_rust_cargo_toml_needs() {
     assert!(readme.contains("git clone https://github.com/lenalab-me/devsrv.git"));
     assert!(readme.contains("cargo install --locked --path ."));
 }
+
+/// The docs show `who` on a server anyone can start, and the workflow says how to run
+/// it, not what runs cost a private repository.
+#[test]
+fn the_docs_show_who_on_a_server_anyone_can_start() {
+    let read = |f: &str| std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(f));
+    let design = read("docs/design.md").unwrap();
+    assert!(design.contains("$ devsrv who 8000\n8000: pid 911 python3 -m http.server 8000 "));
+    assert!(read("README.md").unwrap().contains("devsrv who 8000 "));
+    assert!(
+        !read(".github/workflows/test.yml")
+            .unwrap()
+            .contains("private")
+    );
+}
