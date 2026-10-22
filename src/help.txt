@@ -5,7 +5,7 @@ Usage:
                [--timeout 30s] -- CMD ARGS...
   devsrv ls [--all]                  what devsrv started here: name, state, pid, port, age
   devsrv logs NAME [-n 50] [--follow-until REGEX [--timeout 30s]]
-  devsrv stop NAME... | --all        stops only the process groups devsrv started
+  devsrv stop NAME... | --all        stops only what devsrv started (--all: in this project)
   devsrv who PORT                    who listens on PORT (never stops it)
   devsrv wait [--timeout 30s] [--interval 0.5s] URL [--status 200] | port N
               | file PATH [REGEX] | log NAME REGEX | gone PID | cmd -- CMD ARGS...
@@ -49,7 +49,8 @@ start: ready checks, ports and the supervisor
 stop: what it stops
   stop sends TERM to the command's process group, waits up to 5s, then KILL. A child
   that leaves the group (setsid, daemonizing) is not followed. Only process groups that
-  devsrv started are stopped.
+  devsrv started are stopped. --all stops every name of this git top level (or
+  directory) only, not of the other projects that ls --all shows.
 
 ls: what devsrv started
   One line per name: state, pid, port, age and the directory. ls shows this git top

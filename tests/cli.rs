@@ -1779,3 +1779,36 @@ fn a_port_that_may_not_be_bound_is_a_permission_error_not_in_use() {
     assert!(!r.stderr.contains("cannot see"), "{}", r.stderr);
     assert_eq!(env.process("web"), Value::Null);
 }
+
+/// `ls --all` reaches every project; `stop --all` only this one, and the help says so.
+#[test]
+fn stop_all_stops_this_project_only_as_the_help_says() {
+    let mut env = Env::new();
+    let other = env.add_project();
+    assert_eq!(env.run(&["start", "here", "--", "sleep", "300"]).code, 0);
+    assert_eq!(
+        env.run_in(other, &["start", "there", "--", "sleep", "300"])
+            .code,
+        0
+    );
+    let r = env.run(&["stop", "--all"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.contains("here: stopped"), "{}", r.stdout);
+    let ls = env.run(&["--json", "ls", "--all"]);
+    let v: Value = serde_json::from_str(&ls.stdout).unwrap();
+    let alive: Vec<&str> = v["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["alive"] == true)
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(alive, ["there"]);
+    let help = env.run(&["help", "stop"]).stdout;
+    assert!(
+        help.contains("--all stops every name of this git top level"),
+        "{help}"
+    );
+    let summary = env.run(&["--help"]).stdout;
+    assert!(summary.contains("(--all: in this project)"), "{summary}");
+}
