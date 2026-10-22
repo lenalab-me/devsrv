@@ -10,12 +10,13 @@ const TEXT: &str = include_str!("help.txt");
 type Topic = (&'static str, &'static str, &'static [&'static str]);
 
 const TOPICS: &[Topic] = &[
-    ("start", "start:", &["state", "spelling"]),
+    ("start", "start:", &["compare", "state", "spelling"]),
     ("ls", "ls:", &[]),
     ("logs", "logs:", &[]),
     ("stop", "stop:", &[]),
     ("who", "who:", &[]),
     ("wait", "wait:", &[]),
+    ("compare", "compare:", &[]),
     ("state", "state:", &[]),
     ("spelling", "spelling:", &[]),
 ];
@@ -26,6 +27,7 @@ pub fn canonical(name: &str) -> &str {
         "run" => "start",
         "list" | "ps" => "ls",
         "log" => "logs",
+        "pair" | "pairs" => "compare",
         "kill" => "stop",
         other => other,
     }

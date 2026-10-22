@@ -1076,6 +1076,48 @@ fn a_record_from_before_run_ids_still_reads() {
     assert!(r.stdout.contains("old"), "{}", r.stdout);
 }
 
+/// The body of a GET, or empty.
+fn http_body(url: &str) -> String {
+    let hostport = url.trim_start_matches("http://").split('/').next().unwrap();
+    let mut s = TcpStream::connect(hostport).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.write_all(b"GET / HTTP/1.0\r\n\r\n").unwrap();
+    let mut buf = String::new();
+    s.read_to_string(&mut buf).unwrap();
+    buf.split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default()
+}
+
+/// What `devsrv help compare` shows: the old code from another worktree and the new one,
+/// two names in one place, each on its own port, both stopped in one call.
+#[test]
+fn two_versions_run_side_by_side_under_two_names() {
+    let mut env = Env::new();
+    let old = env.add_project();
+    std::fs::write(env.projects[0].path().join("index.html"), "after\n").unwrap();
+    std::fs::write(env.projects[old].path().join("index.html"), "before\n").unwrap();
+    let line = format!(
+        "cd '{}' && exec python3 -m http.server {{port}}",
+        env.projects[old].path().display()
+    );
+    let before = env.run(&["start", "before", "--port", "auto", "--", "sh", "-c", &line]);
+    assert_eq!(before.code, 0, "{}", before.stderr);
+    let mut args = vec!["start", "after"];
+    args.extend_from_slice(SERVER);
+    let after = env.run(&args);
+    assert_eq!(after.code, 0, "{}", after.stderr);
+    let (b, a) = (before.stdout.trim(), after.stdout.trim());
+    assert_ne!(b, a);
+    assert_eq!(http_body(b), "before\n");
+    assert_eq!(http_body(a), "after\n");
+    let r = env.run(&["stop", "before", "after"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    for name in ["before", "after"] {
+        assert_eq!(env.process(name)["alive"], false, "{name}");
+    }
+}
+
 /// Writes `text` to `path` after `delay`, from another thread.
 fn write_later(path: PathBuf, delay: Duration, text: &'static str) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {

@@ -88,6 +88,20 @@ wait: wait for a condition
   It also takes --port N, --file PATH [REGEX], --log NAME REGEX, --gone PID, --cmd and a
   bare port. There is no `wait grep`: write wait file PATH REGEX.
 
+compare: before and after, side by side
+  Two starts with two names are two servers on two ports; no nohup or pid files. To
+  compare a fix with the code before it, check the old code out in another worktree
+  (a new worktree has no node_modules or build yet: install there first) and start both
+  from the checkout with the fix:
+    git worktree add ../app-before main
+    devsrv start before --port auto -- \
+      sh -c 'cd ../app-before && exec npm run dev -- --port {port}'
+    devsrv start after --port auto -- npm run dev -- --port {port}
+  Each start prints its URL; compare the two (curl, a browser, the tests against each),
+  then devsrv stop before after. The same name can also run once in each worktree: a
+  name belongs to its git top level, and each worktree is one. devsrv ls --all shows
+  both; devsrv stop NAME stops the one of the directory it runs in.
+
 state: where devsrv keeps its records
   State lives in $DEVSRV_STATE_DIR, else $XDG_STATE_HOME/devsrv, else
   ~/.local/state/devsrv. If it is not writable (a sandbox), start fails before running

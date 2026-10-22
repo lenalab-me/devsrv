@@ -19,6 +19,18 @@ devsrv stop web
 
 `{port}` は devsrv が空いているポートに置き換え、同じ値を `PORT` 環境変数にも入れる。`start` は準備ができたら住所を 1 行だけ出して返り、起動中に落ちたら終了コードとログの末尾を出して失敗する。同じ名前は git の top level（またはディレクトリ）ごとに 1 つで、動いているあいだの 2 回目の `start` は失敗する。使い方の要約は `devsrv --help`（40 行以内に書き方・使い方・出力・終了コード。`head -40` で切られても要約は全部届く）。コマンドごとの詳しい説明は `devsrv help COMMAND`（`devsrv COMMAND --help` も同じ。`state`・`spelling` の節も引ける）、全文は `devsrv help all`。`start NAME -- CMD ARGS...` の `--` より後ろは起動するコマンドの引数なので、そこにある `--help` は devsrv の help にならない。
 
+直す前と後を並べて比べるときも、`nohup` や pid のファイルは要らない。名前を変えて 2 回 `start` すれば、別々のポートで 2 つ動く。前のコードは別の worktree に出し、直した側の checkout から両方を立てる。
+
+```sh
+git worktree add ../app-before main                 # 新しい worktree では先に依存を入れる
+devsrv start before --port auto -- sh -c 'cd ../app-before && exec npm run dev -- --port {port}'
+devsrv start after --port auto -- npm run dev -- --port {port}
+# それぞれが出した URL を比べる（curl、ブラウザ、それぞれに向けたテスト）
+devsrv stop before after
+```
+
+名前は git の top level ごとなので、worktree ごとに同じ名前（`web`）で 1 つずつ立ててもよい。`devsrv ls --all` で両方が見え、`devsrv stop web` はそのディレクトリのものを止める。詳しくは `devsrv help compare`。
+
 止めるのは devsrv が起動したプロセスグループだけ。名前ごとに見張り役のプロセス（`devsrv __supervise`）が 1 つ残り、子を回収しないまま終了を見るので、PID が使い回されても他人には届かない。見張り役が殺されたときだけ、記録の PID と OS の起動時刻を照らし、送るたびに確かめ直してから止める。状態は `~/.local/state/devsrv/`（`DEVSRV_STATE_DIR` で変えられる）。
 
 - [設計](docs/design.md): 見張り役、状態とロック、シグナルを送れる型、ポートと準備、設計の判断
