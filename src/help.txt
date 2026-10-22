@@ -82,7 +82,8 @@ wait: wait for a condition
                     is a pattern.
   log NAME REGEX    a line of NAME's log, from the start of its current run; fails at
                     once when NAME has exited.
-  gone PID          the process has exited.
+  gone PID          the process has exited. One of another user (root's) counts as there
+                    until it exits, though devsrv cannot read it.
   cmd -- CMD ARGS   CMD exits 0. Each run has no stdin and its own process group, which
                     is killed when the run ends, at the deadline, or when devsrv wait is
                     killed: nothing a run starts outlives it. On a timeout, the exit

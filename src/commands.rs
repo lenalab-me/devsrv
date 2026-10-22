@@ -1182,10 +1182,11 @@ pub fn wait(
             )
         }
         WaitTarget::Gone(pid) => {
+            // Denied (another user's, root's) still says the process is there; with no
+            // start time to compare, only its exit is seen, not a reuse of its pid.
             let started = match os::proc_info(pid) {
                 Lookup::Found(p) => Some(p.started),
-                Lookup::Gone => None,
-                Lookup::Denied => return Err(Failure::system(format!("cannot observe pid {pid}"))),
+                Lookup::Gone | Lookup::Denied => None,
             };
             (
                 Condition::Gone { pid, started },

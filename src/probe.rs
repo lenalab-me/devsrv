@@ -415,7 +415,7 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
                 Ok(Met::new(format!("pid {pid} is gone")))
             }
             Lookup::Found(_) => Err(format!("pid {pid} is still running")),
-            Lookup::Denied => Err(format!("pid {pid} cannot be observed")),
+            Lookup::Denied => Err(format!("pid {pid} is still running (another user's)")),
         },
         Condition::Delay(at) => {
             if Instant::now() >= *at {

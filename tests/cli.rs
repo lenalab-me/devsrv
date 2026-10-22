@@ -1856,3 +1856,24 @@ fn a_log_ready_server_on_ipv6_only_gets_the_address_that_answers() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(r.stdout.starts_with("127.0.0.1:"), "{}", r.stdout);
 }
+
+/// pid 1 belongs to root: devsrv may not look into it, but it is there, so the wait goes
+/// on and times out, as for any process that is still running.
+#[test]
+fn wait_gone_on_another_users_process_waits_for_it() {
+    let env = Env::new();
+    let r = env.run(&["wait", "gone", "1", "-t", "300ms"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.starts_with(
+            "devsrv: pid 1 to exit: not ready within 0.3s (last check: pid 1 is still running"
+        ),
+        "{}",
+        r.stderr
+    );
+    // One that exits is seen to.
+    let mut short = Command::new("sleep").arg("0.3").spawn().unwrap();
+    let r = env.run(&["wait", "gone", &short.id().to_string(), "-t", "5"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    short.wait().unwrap();
+}
