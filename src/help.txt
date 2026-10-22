@@ -7,7 +7,8 @@ Usage:
   devsrv logs NAME [-n 50] [--follow-until REGEX [--timeout 30s]]
   devsrv stop NAME... | --all        stops only the process groups devsrv started
   devsrv who PORT                    who listens on PORT (never stops it)
-  devsrv wait URL | port N | file PATH | log NAME REGEX | gone PID  [--timeout 30s]
+  devsrv wait [--timeout 30s] [--interval 0.5s] URL [--status 200] | port N
+              | file PATH [REGEX] | log NAME REGEX | gone PID | cmd -- CMD ARGS...
 
 Examples:
   devsrv start web --port auto -- python3 -m http.server {port}
@@ -15,6 +16,8 @@ Examples:
   devsrv start api --port 8080 --ready http:/health -- cargo run
   devsrv start worker --ready 'log:listening' -- node worker.js
   devsrv logs web -n 20;  devsrv stop web;  devsrv wait http://127.0.0.1:8080/
+  devsrv wait http://127.0.0.1:8080/app.js --status 200      (until it is not 404)
+  devsrv wait file build.log 'compiled|error';  devsrv wait cmd -- pg_isready -q
 
 start runs CMD in the background (no shell; `-- sh -c '...'` for one) and returns when
 it is ready. {port} in ARGS becomes the port, also given as $PORT (do not write $PORT
@@ -61,8 +64,29 @@ who: who listens on a port
   It never stops anything. Exit status 1 when the port is free.
 
 wait: wait for a condition
-  wait takes URL, port N, file PATH, log NAME REGEX or gone PID. It also takes
-  --port N, --file PATH, --log NAME REGEX, --gone PID and a bare port.
+  wait checks at once, then every 50ms (cmd: every 0.5s; --interval sets it), until the
+  condition holds, and prints `ready after 1.2s: WHAT`. When --timeout (30s) passes, it
+  fails (exit 1) with the last check on the first line.
+  URL               a final HTTP status from 200 to 499, so 404 counts. --status takes
+                    the codes that count instead: 200, 200-299, 2xx or 200,304.
+  port N            a TCP connection is accepted (127.0.0.1, then ::1).
+  file PATH         the file exists.
+  file PATH REGEX   a line of the file matches (ANSI colors removed); the file may not
+                    exist yet. The whole file is read each time, so a line left by an
+                    earlier run counts too: write to a new file, or match what only this
+                    run prints. On a timeout, the end of the file is shown.
+  log NAME REGEX    a line of NAME's log, from the start of its current run; fails at
+                    once when NAME has exited.
+  gone PID          the process has exited.
+  cmd -- CMD ARGS   CMD exits 0. Each run has no stdin and its own process group, which
+                    is killed at the deadline. On a timeout, the exit status and output of
+                    the last run that finished are shown. Everything after `--` is the
+                    command's, so put --timeout before `cmd`. One quoted line with spaces
+                    runs with sh -c and may be followed by options:
+                    wait cmd 'curl -sf URL | grep ok' --timeout 1m. A CMD that is not on
+                    PATH fails at once (exit 2); a path (./bin/app) may appear later.
+  It also takes --port N, --file PATH [REGEX], --log NAME REGEX, --gone PID, --cmd and a
+  bare port. There is no `wait grep`: write wait file PATH REGEX.
 
 state: where devsrv keeps its records
   State lives in $DEVSRV_STATE_DIR, else $XDG_STATE_HOME/devsrv, else

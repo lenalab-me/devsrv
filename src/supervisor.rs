@@ -19,7 +19,7 @@ use crate::model::{
     Cause, End, ProcRef, RECORD_VERSION, Ready, ReadyInfo, Record, Spec, StartTime, State, UnixMs,
 };
 use crate::os::{self, Child, Lookup};
-use crate::probe::{self, Condition, Outcome};
+use crate::probe::{self, Condition, Outcome, Statuses};
 use crate::store::Claim;
 
 const LOCK_FD_ENV: &str = "DEVSRV_LOCK_FD";
@@ -152,6 +152,7 @@ fn readiness(spec: &Spec, log: PathBuf) -> Condition {
             host: None,
             port,
             path: path.clone(),
+            statuses: Statuses::any_answer(),
         },
         (Ready::Port, Some(port)) => Condition::Port { host: None, port },
         (Ready::Log { pattern }, _) => Condition::Log {

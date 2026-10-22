@@ -1075,3 +1075,289 @@ fn a_record_from_before_run_ids_still_reads() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     assert!(r.stdout.contains("old"), "{}", r.stdout);
 }
+
+/// Writes `text` to `path` after `delay`, from another thread.
+fn write_later(path: PathBuf, delay: Duration, text: &'static str) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        std::fs::write(path, text).unwrap();
+    })
+}
+
+#[test]
+fn wait_status_waits_until_the_page_is_no_longer_404() {
+    let env = Env::new();
+    let url = start_server(&env, "web");
+    let page = format!("{}app.js", url.trim());
+    // A plain wait takes 404 as an answer; --status 200 does not.
+    let r = env.run(&["wait", &page, "--timeout", "5"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["wait", &page, "--status", "200", "--timeout", "300ms"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let first = r.stderr.lines().next().unwrap();
+    assert!(
+        first.contains("app.js: not ready within 0.3s (last check: HTTP 404)"),
+        "{first}"
+    );
+    assert!(r.stderr.contains("hint: --status 200"), "{}", r.stderr);
+    let made = write_later(
+        env.projects[0].path().join("app.js"),
+        Duration::from_millis(400),
+        "x",
+    );
+    let t = Instant::now();
+    let r = env.run(&["wait", &page, "--status", "2xx", "--timeout", "5"]);
+    made.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(
+        t.elapsed() >= Duration::from_millis(350),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(r.stdout.contains("(HTTP 200)"), "{}", r.stdout);
+    // Only a URL has a status.
+    let r = env.run(&["wait", "port", "9", "--status", "200"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    let r = env.run(&["wait", &page, "--status", "2x0"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(
+        r.stderr.starts_with("devsrv: invalid --status `2x0`"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn wait_file_regex_waits_for_the_file_then_the_line() {
+    let env = Env::new();
+    let dir = env.projects[0].path();
+    // The file is not there yet: the wait goes on, and a timeout says so.
+    let r = env.run(&[
+        "wait",
+        "file",
+        "build.log",
+        "built in",
+        "--timeout",
+        "200ms",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.starts_with(
+            "devsrv: `built in` in build.log: not ready within 0.2s (last check: no such file)"
+        ),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("hint: nothing has written build.log yet"),
+        "{}",
+        r.stderr
+    );
+    let made = write_later(
+        dir.join("build.log"),
+        Duration::from_millis(300),
+        "\x1b[32mcompiling\x1b[0m\n\x1b[1mbuilt in\x1b[0m 3ms\n",
+    );
+    let r = env.run(&[
+        "wait",
+        "file",
+        "build.log",
+        "^built in [0-9]+ms$",
+        "-t",
+        "5",
+    ]);
+    made.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout.lines().count(), 1, "{}", r.stdout);
+    assert!(r.stdout.ends_with(": built in 3ms\n"), "{}", r.stdout);
+    // No line matches: the end of the file is shown, colors removed, to fix the pattern.
+    let r = env.run(&[
+        "wait",
+        "--file",
+        "build.log",
+        "listening",
+        "--timeout",
+        "200ms",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("last check: no line matched"),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("  | compiling\n  | built in 3ms\n"),
+        "{}",
+        r.stderr
+    );
+    // The path alone still waits for the file only.
+    let r = env.run(&["wait", "file", "build.log", "--timeout", "1"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    // grep is not a form; the failure says how to write it.
+    let r = env.run(&["wait", "grep", "built", "build.log"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(r.stderr.contains("wait file PATH REGEX"), "{}", r.stderr);
+}
+
+#[test]
+fn wait_cmd_runs_until_it_succeeds() {
+    let env = Env::new();
+    let made = write_later(
+        env.projects[0].path().join("flag"),
+        Duration::from_millis(300),
+        "",
+    );
+    let r = env.run(&["wait", "--timeout", "5", "cmd", "--", "test", "-f", "flag"]);
+    made.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.starts_with("ready after "), "{}", r.stdout);
+    assert!(r.stdout.contains("`test -f flag` exited 0"), "{}", r.stdout);
+    // One quoted line runs with sh -c, and options may follow it.
+    let r = env.run(&[
+        "wait",
+        "cmd",
+        "test -f flag && test -f flag",
+        "--timeout",
+        "2",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+}
+
+#[test]
+fn wait_cmd_that_keeps_failing_shows_its_last_exit_and_output() {
+    let env = Env::new();
+    let r = env.run(&[
+        "wait",
+        "--timeout",
+        "1200ms",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "echo trying; echo refused >&2; exit 3",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    let first = r.stderr.lines().next().unwrap();
+    assert_eq!(
+        first,
+        "devsrv: `echo trying; echo refused >&2; exit 3`: not ready within 1.2s (last check: exit 3)"
+    );
+    assert!(
+        r.stderr.contains("  | trying\n  | refused\n"),
+        "{}",
+        r.stderr
+    );
+    let v: Value = serde_json::from_str(
+        &env.run(&[
+            "--json",
+            "wait",
+            "-t",
+            "300ms",
+            "cmd",
+            "--",
+            "sh",
+            "-c",
+            "echo no; exit 1",
+        ])
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(v["exit_code"], 1);
+    assert_eq!(v["data"]["last"], "exit 1");
+    assert_eq!(v["data"]["tail"], serde_json::json!(["no"]));
+    // The second run is still going at the deadline: what is shown is the first, which
+    // finished, not the one that was cut short.
+    let r = env.run(&[
+        "wait",
+        "--timeout",
+        "1s",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "if [ -f seen ]; then sleep 5; else touch seen; echo first; exit 3; fi",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(r.stderr.contains("(last check: exit 3)"), "{}", r.stderr);
+    assert!(r.stderr.contains("  | first\n"), "{}", r.stderr);
+    // devsrv's options after `--` are the command's; the failure says where they go.
+    let r = env.run(&[
+        "wait",
+        "-t",
+        "300ms",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "exit 1",
+        "--timeout",
+        "5",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("put devsrv's options before `cmd`"),
+        "{}",
+        r.stderr
+    );
+}
+
+#[test]
+fn wait_cmd_kills_a_run_at_the_deadline_with_its_group() {
+    let env = Env::new();
+    let t = Instant::now();
+    let r = env.run(&[
+        "wait",
+        "--timeout",
+        "500ms",
+        "cmd",
+        "--",
+        "sh",
+        "-c",
+        "sleep 300 & echo $! > child.pid; sleep 300",
+    ]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+    assert!(
+        r.stderr
+            .contains("last check: still running at the deadline; killed it"),
+        "{}",
+        r.stderr
+    );
+    assert!(
+        r.stderr
+            .contains("hint: one run takes longer than --timeout"),
+        "{}",
+        r.stderr
+    );
+    let pid: u32 = std::fs::read_to_string(env.projects[0].path().join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(
+        eventually(Duration::from_secs(2), || !pid_alive(pid)),
+        "the background child {pid} of the run is still alive"
+    );
+}
+
+#[test]
+fn wait_cmd_not_on_path_fails_at_once_but_a_path_is_waited_for() {
+    let env = Env::new();
+    let t = Instant::now();
+    let r = env.run(&["wait", "cmd", "--", "no-such-command-devsrv"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(
+        r.stderr
+            .starts_with("devsrv: cannot run `no-such-command-devsrv`: not found on PATH"),
+        "{}",
+        r.stderr
+    );
+    let r = env.run(&["wait", "-t", "300ms", "cmd", "--", "./bin/app"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("last check: cannot run it"),
+        "{}",
+        r.stderr
+    );
+}

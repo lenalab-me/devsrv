@@ -25,5 +25,5 @@ The maintained source for verifying what agents see of devsrv. Read this index, 
 |---|---|
 | `start.md` | start, readiness kinds, `{port}`, already started, failures before ready, survives the caller |
 | `stop.md` | stop with grandchildren, TERM vs KILL, twice, unknown name, the supervisor gone, a reused pid |
-| `wait-and-logs.md` | wait (URL, port, file, gone, log), logs -n, --follow-until |
+| `wait-and-logs.md` | wait (URL, --status, port, file, file REGEX, gone, log, cmd), logs -n, --follow-until |
 | `who-and-ls.md` | who for devsrv and foreign listeners, ls text and JSON, two projects |

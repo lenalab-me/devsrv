@@ -631,11 +631,16 @@ pub fn logs(
         path: path.clone(),
         pattern,
     };
-    follow_log(&inst, cond, timeout)
+    follow_log(&inst, cond, timeout, probe::EVERY)
 }
 
 /// Waits for a log line. Gives up early when the process is gone and the log is read.
-fn follow_log(inst: &Instance, cond: Condition, timeout: Duration) -> Result<Output, Failure> {
+fn follow_log(
+    inst: &Instance,
+    cond: Condition,
+    timeout: Duration,
+    every: Duration,
+) -> Result<Output, Failure> {
     let name = &inst.name;
     let ended = || match inst.status() {
         Ok(Some((record, status))) if !alive(&record, status) => Some(()),
@@ -643,7 +648,7 @@ fn follow_log(inst: &Instance, cond: Condition, timeout: Duration) -> Result<Out
         _ => None,
     };
     let mut gone_once = false;
-    let outcome = probe::wait_for(&cond, timeout, || {
+    let outcome = probe::wait_every(&cond, timeout, every, || {
         // One more look at the log after the process is seen gone.
         if gone_once {
             return Some(());
@@ -1024,20 +1029,37 @@ pub fn who(port: u16) -> Result<Output, Failure> {
     ))
 }
 
-pub fn wait(target: WaitTarget, timeout: Duration) -> Result<Output, Failure> {
+pub fn wait(
+    target: WaitTarget,
+    timeout: Duration,
+    interval: Option<Duration>,
+) -> Result<Output, Failure> {
+    let mut every = probe::EVERY;
     let (cond, what, hint) = match target {
-        WaitTarget::Url { host, port, path } => {
+        WaitTarget::Url {
+            host,
+            port,
+            path,
+            statuses,
+        } => {
             let url = format!("http://{host}:{port}{path}");
+            let hint = match &statuses {
+                Some(s) => format!(
+                    "--status {s} asks for exactly those codes; check the path of the URL, or raise --timeout"
+                ),
+                None => format!(
+                    "devsrv who {port} shows who holds the port; devsrv ls shows what devsrv started"
+                ),
+            };
             (
                 Condition::Http {
                     host: Some(host),
                     port,
                     path,
+                    statuses: statuses.unwrap_or_else(probe::Statuses::any_answer),
                 },
                 url,
-                format!(
-                    "devsrv who {port} shows who holds the port; devsrv ls shows what devsrv started"
-                ),
+                hint,
             )
         }
         WaitTarget::Port(port) => (
@@ -1047,9 +1069,40 @@ pub fn wait(target: WaitTarget, timeout: Duration) -> Result<Output, Failure> {
                 "devsrv ls shows what devsrv started; devsrv who {port} shows who holds the port"
             ),
         ),
-        WaitTarget::File(p) => {
-            let w = p.display().to_string();
-            (Condition::File(p), w, "check the path".into())
+        WaitTarget::File {
+            path,
+            pattern: None,
+        } => {
+            let w = path.display().to_string();
+            (Condition::File(path), w, "check the path".into())
+        }
+        WaitTarget::File {
+            path,
+            pattern: Some(pattern),
+        } => {
+            let w = format!("`{}` in {}", pattern.as_str(), path.display());
+            (
+                Condition::Log { path, pattern },
+                w,
+                "check the pattern against the lines above, or raise --timeout".into(),
+            )
+        }
+        WaitTarget::Cmd(argv) => {
+            every = probe::CMD_EVERY;
+            if !argv[0].contains('/') && !on_path(&argv[0]) {
+                return Err(Failure::new(
+                    USAGE,
+                    "cannot_run",
+                    format!("cannot run `{}`: not found on PATH", argv[0]),
+                )
+                .hint("check the command name and PATH; for a shell line use -- sh -c '...'"));
+            }
+            let w = format!("`{}`", probe::shown(&argv));
+            (
+                Condition::Cmd(argv),
+                w,
+                "run it once yourself to see why it fails, or raise --timeout".into(),
+            )
         }
         WaitTarget::Gone(pid) => {
             let started = match os::proc_info(pid) {
@@ -1074,23 +1127,96 @@ pub fn wait(target: WaitTarget, timeout: Duration) -> Result<Output, Failure> {
                     pattern,
                 },
                 timeout,
+                interval.unwrap_or(every),
             );
         }
     };
-    match probe::wait_for(&cond, timeout, || None::<()>) {
+    match probe::wait_every(&cond, timeout, interval.unwrap_or(every), || None::<()>) {
         Outcome::Met(met, waited) => Ok(Output::new(
             format!("ready after {}: {}\n", human(waited), met.what),
             json!({ "waited_ms": waited.as_millis() as u64, "what": met.what }),
         )),
-        Outcome::TimedOut(last) => Err(Failure::new(
-            NOT_MET,
-            "timed_out",
-            format!(
-                "{what}: not ready within {} (last check: {last})",
-                human(timeout)
-            ),
-        )
-        .hint(hint)),
+        Outcome::TimedOut(last) => Err(timed_out(&cond, &what, timeout, &last, hint)),
         Outcome::Aborted(()) => unreachable!("wait has no abort"),
     }
+}
+
+/// The failure of a wait that ran out of time: what it waited for and the last check on
+/// the first line, then what helps to fix it (the output of the last run, the end of the
+/// file that did not match).
+fn timed_out(cond: &Condition, what: &str, timeout: Duration, last: &str, hint: String) -> Failure {
+    let mut lines = last.lines();
+    let first = lines.next().unwrap_or("");
+    let mut f = Failure::new(
+        NOT_MET,
+        "timed_out",
+        format!(
+            "{what}: not ready within {} (last check: {first})",
+            human(timeout)
+        ),
+    );
+    let mut hints = vec![hint];
+    let (label, shown): (String, Vec<String>) = match cond {
+        Condition::Cmd(argv) => {
+            if first == probe::CUT {
+                hints = vec!["one run takes longer than --timeout: raise it".into()];
+            }
+            // `wait cmd -- curl URL --timeout 5`: after `--`, that is curl's option.
+            if argv
+                .iter()
+                .any(|a| ["--timeout", "--interval"].contains(&a.split('=').next().unwrap_or("")))
+            {
+                hints.push(
+                    "everything after `--` goes to the command; put devsrv's options before `cmd`: devsrv wait --timeout 60s cmd -- CMD ARGS..."
+                        .into(),
+                );
+            }
+            let out: Vec<String> = lines.map(String::from).collect();
+            let label = if out.is_empty() {
+                "output of the last run: (none)".to_string()
+            } else {
+                format!("output of the last run (last {} lines):", out.len())
+            };
+            (label, out)
+        }
+        Condition::Log { path, .. } if !path.exists() => {
+            hints = vec![format!(
+                "nothing has written {} yet: check the path (relative to the current directory)",
+                path.display()
+            )];
+            (String::new(), vec![])
+        }
+        Condition::Log { path, .. } => {
+            let (tail, total) = probe::tail(path, LOG_TAIL);
+            let tail: Vec<String> = tail.iter().map(|l| probe::strip_ansi(l)).collect();
+            let label = if total == 0 {
+                format!("{}: (empty)", path.display())
+            } else {
+                format!("{} (last {} of {total} lines):", path.display(), tail.len())
+            };
+            (label, tail)
+        }
+        _ => (String::new(), vec![]),
+    };
+    if !label.is_empty() {
+        f = f.detail(label);
+    }
+    for l in &shown {
+        f = f.detail(format!("| {l}"));
+    }
+    for h in hints {
+        f = f.hint(h);
+    }
+    f.data(json!({ "last": first, "tail": shown }))
+}
+
+/// Is there an executable file of this name in a directory of $PATH?
+fn on_path(name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| {
+            fs::metadata(dir.join(name))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+    })
 }

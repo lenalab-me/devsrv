@@ -8,6 +8,7 @@ use std::time::Duration;
 use regex_lite::Regex;
 
 use crate::model::{Name, Ready};
+use crate::probe::Statuses;
 use crate::report::Failure;
 
 pub enum Cmd {
@@ -35,6 +36,8 @@ pub enum Cmd {
     Wait {
         target: WaitTarget,
         timeout: Duration,
+        /// `--interval`: the pause between checks, if not the default of the target.
+        interval: Option<Duration>,
     },
 }
 
@@ -57,14 +60,22 @@ pub enum WaitTarget {
         host: String,
         port: u16,
         path: String,
+        /// `--status`; none means any final status from 200 to 499.
+        statuses: Option<Statuses>,
     },
     Port(u16),
-    File(PathBuf),
+    /// The file exists; with a pattern, a line of it matches.
+    File {
+        path: PathBuf,
+        pattern: Option<Regex>,
+    },
     Log {
         name: Name,
         pattern: Regex,
     },
     Gone(i32),
+    /// The command exits 0.
+    Cmd(Vec<String>),
 }
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -78,7 +89,9 @@ fn usage_of(sub: &str) -> &'static str {
         "logs" => "devsrv logs NAME [-n 50] [--follow-until REGEX [--timeout 30s]]",
         "stop" => "devsrv stop NAME... | --all",
         "who" => "devsrv who PORT",
-        _ => "devsrv wait URL | port N | file PATH | log NAME REGEX | gone PID  [--timeout 30s]",
+        _ => {
+            "devsrv wait [--timeout 30s] [--interval 0.5s] URL [--status 200] | port N | file PATH [REGEX] | log NAME REGEX | gone PID | cmd -- CMD ARGS..."
+        }
     }
 }
 
@@ -100,6 +113,9 @@ impl Args {
         let a = self.items.get(self.pos).cloned();
         self.pos += 1;
         a
+    }
+    fn peek(&self) -> Option<&str> {
+        self.items.get(self.pos).map(String::as_str)
     }
     fn rest(&mut self) -> Vec<String> {
         let r = self.items[self.pos.min(self.items.len())..].to_vec();
@@ -151,6 +167,37 @@ fn timeout(sub: &str, text: &str) -> Result<Duration, Failure> {
             format!("invalid --timeout `{text}`: use seconds (30, 30s), 500ms or 2m"),
         )
     })
+}
+
+/// `200`, `200-299`, `2xx`, or several of them with commas: `200,204,3xx`.
+fn statuses(text: &str) -> Result<Statuses, Failure> {
+    let one = |item: &str| -> Option<(u16, u16)> {
+        let item = item.trim();
+        let code = |s: &str| {
+            s.trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|c| (100..=599).contains(c))
+        };
+        if let Some(d) = item.strip_suffix("xx").or_else(|| item.strip_suffix("XX")) {
+            let d = code(&format!("{d}00"))?;
+            return Some((d, d + 99));
+        }
+        match item.split_once('-') {
+            Some((lo, hi)) => Some((code(lo)?, code(hi)?)).filter(|(lo, hi)| lo <= hi),
+            None => code(item).map(|c| (c, c)),
+        }
+    };
+    text.split(',')
+        .map(one)
+        .collect::<Option<Vec<_>>>()
+        .map(Statuses)
+        .ok_or_else(|| {
+            bad(
+                "wait",
+                format!("invalid --status `{text}`: codes from 100 to 599, as 200, 200-299, 2xx or 200,304"),
+            )
+        })
 }
 
 fn port(sub: &str, text: &str) -> Result<u16, Failure> {
@@ -429,13 +476,40 @@ fn url(text: &str) -> Result<WaitTarget, Failure> {
         host: host.to_string(),
         port: p,
         path,
+        statuses: None,
     })
 }
 
 fn wait(a: &mut Args) -> Result<Cmd, Failure> {
     let sub = a.sub;
-    let (mut target, mut t) = (None, DEFAULT_TIMEOUT);
+    let (mut target, mut t, mut interval) = (None, DEFAULT_TIMEOUT, None);
+    let mut codes: Option<Statuses> = None;
+    // After `cmd`: the first argument that is not an option starts the command.
+    let mut cmd = false;
     while let Some(x) = a.next() {
+        if cmd && target.is_none() && !x.starts_with('-') && x.contains(char::is_whitespace) {
+            // `cmd 'curl -sf URL' --timeout 5`: a quoted shell line is the whole command,
+            // so what follows it can only be devsrv's.
+            target = Some(WaitTarget::Cmd(vec!["sh".into(), "-c".into(), x]));
+            continue;
+        }
+        if x == "--" || (cmd && target.is_none() && !x.starts_with('-')) {
+            let mut argv = if x == "--" {
+                a.rest()
+            } else {
+                std::iter::once(x).chain(a.rest()).collect()
+            };
+            if argv.is_empty() {
+                return Err(bad(sub, "missing the command to run after `--`"));
+            }
+            if argv.len() == 1 && argv[0].contains(char::is_whitespace) {
+                argv = vec!["sh".into(), "-c".into(), argv.remove(0)];
+            }
+            if target.replace(WaitTarget::Cmd(argv)).is_some() {
+                return Err(bad(sub, "give one thing to wait for"));
+            }
+            break;
+        }
         let (k, inline) = split_opt(&x);
         let set = |target: &mut Option<WaitTarget>, v: WaitTarget| {
             if target.replace(v).is_some() {
@@ -446,11 +520,52 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
         };
         match k.trim_start_matches("--") {
             "timeout" | "-t" => t = timeout(sub, &a.value(&k, inline)?)?,
+            "interval" | "every" | "-i" => {
+                let v = a.value(&k, inline)?;
+                interval = Some(duration(&v).ok_or_else(|| {
+                    bad(
+                        sub,
+                        format!("invalid --interval `{v}`: use seconds (1, 1s), 500ms or 2m"),
+                    )
+                })?)
+            }
+            "status" | "-s" => {
+                let more = statuses(&a.value(&k, inline)?)?;
+                codes.get_or_insert(Statuses(vec![])).0.extend(more.0);
+            }
+            "cmd" | "command" => {
+                if target.is_some() {
+                    return Err(bad(sub, "give one thing to wait for"));
+                }
+                if let Some(line) = inline {
+                    // `--cmd='curl -sf x'`: one shell line.
+                    a.items.insert(a.pos, line);
+                }
+                cmd = true;
+            }
+            "grep" => {
+                return Err(bad(
+                    sub,
+                    "wait has no grep; a line of a file is `wait file PATH REGEX`",
+                )
+                .hint("devsrv wait file PATH REGEX (the path first, then the pattern)"));
+            }
             "port" => {
                 let v = a.value(&k, inline)?;
                 set(&mut target, WaitTarget::Port(port(sub, &v)?))?
             }
-            "file" => set(&mut target, WaitTarget::File(a.value(&k, inline)?.into()))?,
+            "file" => {
+                let path = a.value(&k, inline)?.into();
+                // An optional pattern: the next argument, unless it is an option.
+                let pattern = match a.peek() {
+                    Some(p) if !p.starts_with('-') && p.parse::<u16>().is_err() => {
+                        let p = a.next().expect("peeked");
+                        Some(regex(sub, &p)?)
+                    }
+                    _ => None,
+                };
+                set(&mut target, WaitTarget::File { path, pattern })?
+            }
             "gone" => {
                 let v = a.value(&k, inline)?;
                 let pid = v
@@ -481,8 +596,24 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
             _ => return Err(bad(sub, format!("unexpected `{x}`"))),
         }
     }
-    let target = target.ok_or_else(|| bad(sub, "nothing to wait for"))?;
-    Ok(Cmd::Wait { target, timeout: t })
+    if cmd && target.is_none() {
+        return Err(bad(sub, "missing the command to run after `cmd --`"));
+    }
+    let mut target = target.ok_or_else(|| bad(sub, "nothing to wait for"))?;
+    if let Some(c) = codes {
+        match &mut target {
+            WaitTarget::Url { statuses, .. } => *statuses = Some(c),
+            _ => {
+                return Err(bad(sub, "--status is for wait URL")
+                    .hint("wait http://127.0.0.1:PORT/PATH --status 200"));
+            }
+        }
+    }
+    Ok(Cmd::Wait {
+        target,
+        timeout: t,
+        interval,
+    })
 }
 
 #[cfg(test)]
@@ -589,6 +720,115 @@ mod tests {
             })
         ));
         assert_eq!(p("wait https://x").err().map(|f| f.code), Some(2));
+    }
+
+    #[test]
+    fn wait_statuses() {
+        let codes = |s: &str| match p(s) {
+            Ok(Cmd::Wait {
+                target: WaitTarget::Url { statuses, .. },
+                ..
+            }) => statuses.map(|s| s.0),
+            _ => panic!("{s}"),
+        };
+        assert_eq!(codes("wait http://x:1/"), None);
+        assert_eq!(
+            codes("wait http://x:1/ --status 200"),
+            Some(vec![(200, 200)])
+        );
+        assert_eq!(
+            codes("wait --status=2xx,304 http://x:1/ -s 400-404"),
+            Some(vec![(200, 299), (304, 304), (400, 404)])
+        );
+        for bad in ["2x0", "99", "600", "300-200", "", "200,"] {
+            let s = format!("wait http://x:1/ --status {bad}");
+            assert_eq!(p(&s).err().map(|f| f.code), Some(2), "{s}");
+        }
+        assert_eq!(p("wait port 9 --status 200").err().map(|f| f.code), Some(2));
+    }
+
+    #[test]
+    fn wait_file_and_cmd_forms() {
+        let Ok(Cmd::Wait {
+            target: WaitTarget::File {
+                pattern: Some(r), ..
+            },
+            timeout,
+            ..
+        }) = p("wait file out.log ready --timeout 5")
+        else {
+            panic!()
+        };
+        assert_eq!((r.as_str(), timeout), ("ready", Duration::from_secs(5)));
+        assert!(matches!(
+            p("wait --file out.log -t 5"),
+            Ok(Cmd::Wait {
+                target: WaitTarget::File { pattern: None, .. },
+                ..
+            })
+        ));
+        let argv = |s: Vec<&str>| match parse(s.into_iter().map(String::from).collect()).1 {
+            Ok(Cmd::Wait {
+                target: WaitTarget::Cmd(a),
+                timeout,
+                interval,
+            }) => (a, timeout, interval),
+            Ok(_) => panic!("not cmd"),
+            Err(f) => panic!("{}", f.text()),
+        };
+        // After `--`, everything is the command's, --timeout too.
+        let (a, t, _) = argv(vec![
+            "wait",
+            "cmd",
+            "--",
+            "curl",
+            "-sf",
+            "x",
+            "--timeout",
+            "5",
+        ]);
+        assert_eq!(a, ["curl", "-sf", "x", "--timeout", "5"]);
+        assert_eq!(t, DEFAULT_TIMEOUT);
+        let (a, t, i) = argv(vec![
+            "wait",
+            "-t",
+            "5",
+            "--interval",
+            "2s",
+            "cmd",
+            "--",
+            "true",
+        ]);
+        assert_eq!(
+            (a, t, i),
+            (
+                vec!["true".to_string()],
+                Duration::from_secs(5),
+                Some(Duration::from_secs(2))
+            )
+        );
+        let (a, _, _) = argv(vec!["wait", "cmd", "pg_isready", "-q"]);
+        assert_eq!(a, ["pg_isready", "-q"]);
+        // One quoted line is the whole command; options may follow it.
+        let (a, t, _) = argv(vec![
+            "wait",
+            "cmd",
+            "curl -sf x | grep ok",
+            "--timeout",
+            "5",
+        ]);
+        assert_eq!(a, ["sh", "-c", "curl -sf x | grep ok"]);
+        assert_eq!(t, Duration::from_secs(5));
+        let (a, _, _) = argv(vec!["wait", "--cmd=test -f x"]);
+        assert_eq!(a, ["sh", "-c", "test -f x"]);
+        for bad in [
+            "wait cmd",
+            "wait cmd --",
+            "wait grep x y",
+            "wait port 9 cmd -- true",
+        ] {
+            assert_eq!(p(bad).err().map(|f| f.code), Some(2), "{bad}");
+        }
     }
 
     #[test]

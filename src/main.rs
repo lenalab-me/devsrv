@@ -37,7 +37,11 @@ fn main() {
         }) => commands::logs(name, lines, follow, timeout),
         Ok(Cmd::Stop { names, all }) => commands::stop(names, all),
         Ok(Cmd::Who { port }) => commands::who(port),
-        Ok(Cmd::Wait { target, timeout }) => commands::wait(target, timeout),
+        Ok(Cmd::Wait {
+            target,
+            timeout,
+            interval,
+        }) => commands::wait(target, timeout, interval),
         Err(f) => Err(f),
     };
     std::process::exit(report::emit(result, json).into());

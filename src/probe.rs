@@ -4,19 +4,53 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use regex_lite::Regex;
 
 use crate::os::{Lookup, proc_info};
 
+/// The HTTP statuses that count as ready: ranges, both ends included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Statuses(pub Vec<(u16, u16)>);
+
+impl Statuses {
+    /// What `--ready http` and a plain `wait URL` accept: the server answers, even with
+    /// "not found", but is not failing.
+    pub fn any_answer() -> Statuses {
+        Statuses(vec![(200, 499)])
+    }
+    pub fn contains(&self, code: u16) -> bool {
+        self.0.iter().any(|&(lo, hi)| (lo..=hi).contains(&code))
+    }
+}
+
+impl std::fmt::Display for Statuses {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let parts: Vec<String> = self
+            .0
+            .iter()
+            .map(|&(lo, hi)| {
+                if lo == hi {
+                    lo.to_string()
+                } else {
+                    format!("{lo}-{hi}")
+                }
+            })
+            .collect();
+        f.write_str(&parts.join(","))
+    }
+}
+
 pub enum Condition {
-    /// A final HTTP response from 200 to 499 on `host:port` (or, with no host, on
+    /// A final HTTP response with one of `statuses` on `host:port` (or, with no host, on
     /// 127.0.0.1 then ::1).
     Http {
         host: Option<String>,
         port: u16,
         path: String,
+        statuses: Statuses,
     },
     Port {
         host: Option<String>,
@@ -27,6 +61,8 @@ pub enum Condition {
         pattern: Regex,
     },
     File(PathBuf),
+    /// The command exits 0. Each run is killed, with its process group, at the deadline.
+    Cmd(Vec<String>),
     /// The process is gone: no longer there, a zombie, or its pid was reused.
     Gone {
         pid: i32,
@@ -57,29 +93,51 @@ pub enum Outcome<A> {
     Aborted(A),
 }
 
+/// The pause between probes, unless the caller asks for another.
+pub const EVERY: Duration = Duration::from_millis(50);
+/// The pause between runs of `Condition::Cmd`: a command costs more than a connect.
+pub const CMD_EVERY: Duration = Duration::from_millis(500);
+
 /// Probes until the condition holds, the deadline passes, or `abort` returns something.
 /// The first probe is immediate; then one every 50 ms. A single probe never runs past
-/// the deadline.
+/// the deadline, and none starts at it: one with no time left would only say that, in
+/// place of what the last one saw.
 pub fn wait_for<A>(
     cond: &Condition,
     limit: Duration,
+    abort: impl FnMut() -> Option<A>,
+) -> Outcome<A> {
+    wait_every(cond, limit, EVERY, abort)
+}
+
+/// `wait_for` with another pause between probes.
+pub fn wait_every<A>(
+    cond: &Condition,
+    limit: Duration,
+    every: Duration,
     mut abort: impl FnMut() -> Option<A>,
 ) -> Outcome<A> {
     let start = Instant::now();
     let deadline = start + limit;
+    let mut last: Option<String> = None;
     loop {
-        let last = match check(cond, deadline) {
+        last = match check(cond, deadline) {
             Ok(met) => return Outcome::Met(met, start.elapsed()),
-            Err(seen) => seen,
+            // A run the deadline cut short says less than the last one that finished.
+            Err(seen) if seen.starts_with(CUT) && last.is_some() => last,
+            Err(seen) => Some(seen),
         };
         if let Some(a) = abort() {
             return Outcome::Aborted(a);
         }
         let now = Instant::now();
         if now >= deadline {
-            return Outcome::TimedOut(last);
+            return Outcome::TimedOut(last.unwrap_or_default());
         }
-        std::thread::sleep(Duration::from_millis(50).min(deadline - now));
+        std::thread::sleep(every.min(deadline - now));
+        if Instant::now() >= deadline {
+            return Outcome::TimedOut(last.unwrap_or_default());
+        }
     }
 }
 
@@ -189,11 +247,16 @@ fn http_status(
 
 fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
     match cond {
-        Condition::Http { host, port, path } => {
+        Condition::Http {
+            host,
+            port,
+            path,
+            statuses,
+        } => {
             let try_one = |addr: &SocketAddr| {
                 let h = url_host(addr, host);
                 match http_status(addr, &h, path, deadline) {
-                    Ok(code) if (200..500).contains(&code) => Ok((h, code)),
+                    Ok(code) if statuses.contains(code) => Ok((h, code)),
                     Ok(code) => Err(format!("HTTP {code}")),
                     Err(e) => Err(e),
                 }
@@ -215,8 +278,10 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
         }
         Condition::Log { path, pattern } => match find_line(path, pattern) {
             Some(line) => Ok(Met::new(line)),
+            None if !path.exists() => Err("no such file".into()),
             None => Err("no line matched".into()),
         },
+        Condition::Cmd(argv) => run_once(argv, deadline),
         Condition::File(p) => {
             if p.is_file() {
                 Ok(Met::new(p.display().to_string()))
@@ -240,6 +305,101 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
             }
         }
     }
+}
+
+/// How many lines of a failed run's output the failure shows.
+const CMD_TAIL: usize = 10;
+
+/// What a run of `Condition::Cmd` that was still going at the deadline saw.
+pub const CUT: &str = "still running at the deadline; killed it";
+
+/// `curl -sf 'http://x/a b'`: the command as one would type it.
+pub fn shown(argv: &[String]) -> String {
+    if let [sh, c, line] = argv
+        && sh == "sh"
+        && c == "-c"
+    {
+        return line.clone();
+    }
+    argv.iter()
+        .map(|a| {
+            if a.is_empty() || a.contains(|c: char| c.is_whitespace() || "'\"$`\\".contains(c)) {
+                format!("'{}'", a.replace('\'', r"'\''"))
+            } else {
+                a.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One run of a check command. Its output goes to an unlinked file, not a pipe, so a
+/// child it leaves behind cannot keep the read open. At the deadline its process group
+/// is killed while the leader is still unreaped, so the group id cannot have been reused.
+/// The error is "exit 1" (or so), then the last lines of the output, one per line.
+fn run_once(argv: &[String], deadline: Instant) -> Result<Met, String> {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let mut out = scratch().map_err(|e| format!("cannot make a file for the output: {e}"))?;
+    let (o, e) = match (out.try_clone(), out.try_clone()) {
+        (Ok(o), Ok(e)) => (o, e),
+        (Err(x), _) | (_, Err(x)) => return Err(format!("cannot make a file for the output: {x}")),
+    };
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(o)
+        .stderr(e)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("cannot run it: {e}"))?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break Some(s),
+            Ok(None) => {}
+            Err(e) => return Err(format!("cannot watch it: {e}")),
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            // SAFETY: kill(2) with the group id of our unreaped child; no memory involved.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(10).min(deadline - now));
+    };
+    let mut text = match status {
+        Some(s) if s.success() => return Ok(Met::new(format!("`{}` exited 0", shown(argv)))),
+        Some(s) => match (s.code(), s.signal()) {
+            (Some(c), _) => format!("exit {c}"),
+            (_, Some(n)) => format!("killed by signal {n}"),
+            _ => "ended".into(),
+        },
+        None => CUT.into(),
+    };
+    let (lines, _) = tail_of(&mut out, CMD_TAIL);
+    for l in lines {
+        text.push('\n');
+        text.push_str(&l);
+    }
+    Err(text)
+}
+
+/// A file for one run's output, already unlinked: it goes away with the last handle.
+fn scratch() -> std::io::Result<fs::File> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "devsrv-wait-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let _ = fs::remove_file(&path);
+    Ok(f)
 }
 
 /// Removes ANSI escape sequences (colors, cursor moves) so patterns see plain text.
@@ -281,6 +441,10 @@ pub fn tail(path: &Path, n: usize) -> (Vec<String>, usize) {
     let Ok(mut f) = fs::File::open(path) else {
         return (vec![], 0);
     };
+    tail_of(&mut f, n)
+}
+
+fn tail_of(f: &mut fs::File, n: usize) -> (Vec<String>, usize) {
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let from = len.saturating_sub(1 << 20);
     let _ = f.seek(SeekFrom::Start(from));
