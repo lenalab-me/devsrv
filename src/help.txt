@@ -71,7 +71,7 @@ wait: wait for a condition
   condition holds, and prints `ready after 1.2s: WHAT`. When --timeout (30s) passes, it
   fails (exit 1) with the last check on the first line.
   URL               a final HTTP status from 200 to 499, so 404 counts. --status takes
-                    the codes that count instead: 200, 200-299, 2xx or 200,304.
+                    the codes that count instead (200 to 599): 200, 200-299, 2xx or 200,304.
   port N            a TCP connection is accepted (127.0.0.1, then ::1).
   file PATH         the file exists.
   file PATH REGEX   a line of the file matches (ANSI colors removed); the file may not

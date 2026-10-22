@@ -1877,3 +1877,14 @@ fn wait_gone_on_another_users_process_waits_for_it() {
     assert_eq!(r.code, 0, "{}", r.stderr);
     short.wait().unwrap();
 }
+
+/// No wait can end on a 1xx (it is never the final status), so it is not taken.
+#[test]
+fn wait_status_refuses_1xx() {
+    let env = Env::new();
+    for s in ["1xx", "101", "100-299"] {
+        let r = env.run(&["wait", "http://127.0.0.1:9/", "--status", s]);
+        assert_eq!(r.code, 2, "{s}: {}", r.stderr);
+        assert!(r.stderr.contains("codes from 200 to 599"), "{}", r.stderr);
+    }
+}

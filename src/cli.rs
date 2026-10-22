@@ -195,7 +195,8 @@ fn timeout(sub: &str, text: &str) -> Result<Duration, Failure> {
     })
 }
 
-/// `200`, `200-299`, `2xx`, or several of them with commas: `200,204,3xx`.
+/// `200`, `200-299`, `2xx`, or several of them with commas: `200,204,3xx`. A 1xx is
+/// never final, so no wait could end on one.
 fn statuses(text: &str) -> Result<Statuses, Failure> {
     let one = |item: &str| -> Option<(u16, u16)> {
         let item = item.trim();
@@ -203,7 +204,7 @@ fn statuses(text: &str) -> Result<Statuses, Failure> {
             s.trim()
                 .parse::<u16>()
                 .ok()
-                .filter(|c| (100..=599).contains(c))
+                .filter(|c| (200..=599).contains(c))
         };
         if let Some(d) = item.strip_suffix("xx").or_else(|| item.strip_suffix("XX")) {
             let d = code(&format!("{d}00"))?;
@@ -221,7 +222,7 @@ fn statuses(text: &str) -> Result<Statuses, Failure> {
         .ok_or_else(|| {
             bad(
                 "wait",
-                format!("invalid --status `{text}`: codes from 100 to 599, as 200, 200-299, 2xx or 200,304"),
+                format!("invalid --status `{text}`: codes from 200 to 599, as 200, 200-299, 2xx or 200,304"),
             )
         })
 }
@@ -880,7 +881,9 @@ mod tests {
             codes("wait --status=2xx,304 http://x:1/ -s 400-404"),
             Some(vec![(200, 299), (304, 304), (400, 404)])
         );
-        for bad in ["2x0", "99", "600", "300-200", "", "200,"] {
+        for bad in [
+            "2x0", "99", "600", "300-200", "", "200,", "1xx", "101", "100-299",
+        ] {
             let s = format!("wait http://x:1/ --status {bad}");
             assert_eq!(p(&s).err().map(|f| f.code), Some(2), "{s}");
         }
