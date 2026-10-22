@@ -44,6 +44,12 @@ pub fn proc_info(pid: i32) -> Lookup<ProcInfo> {
     }
 }
 
+/// A process that ended between the listing of /proc and the read: ENOENT, or ESRCH
+/// while it is being taken down.
+fn vanished(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH)
+}
+
 fn all_pids() -> io::Result<Vec<i32>> {
     Ok(fs::read_dir("/proc")?
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
@@ -57,7 +63,7 @@ pub fn group_members(pgid: i32) -> io::Result<Vec<ProcInfo>> {
     for pid in all_pids()? {
         let text = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) if vanished(&e) => continue,
             Err(e) => return Err(e),
         };
         let p = parse_stat(pid, &text, &boot)
@@ -146,6 +152,13 @@ pub fn tcp_listeners(port: u16) -> io::Result<Vec<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_process_that_ended_while_read_is_skipped_not_an_error() {
+        assert!(vanished(&io::Error::from_raw_os_error(libc::ESRCH)));
+        assert!(vanished(&io::Error::from(io::ErrorKind::NotFound)));
+        assert!(!vanished(&io::Error::from_raw_os_error(libc::EACCES)));
+    }
 
     #[test]
     fn stat_with_spaces_and_parens_in_the_name() {

@@ -1731,3 +1731,23 @@ fn wait_sends_a_valid_request_to_an_ipv6_url_with_a_query() {
         "{request}"
     );
 }
+
+/// Processes that end while devsrv reads the process list (on Linux, /proc/<pid>/stat
+/// read after the pid was listed) are skipped, not taken as a failure to read it.
+#[test]
+fn stop_is_not_thrown_by_processes_that_come_and_go() {
+    use std::os::unix::process::CommandExt;
+    let env = Env::new();
+    let churn = Command::new("sh")
+        .args(["-c", "while :; do /bin/sh -c : ; done"])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let churn = Stranger(churn);
+    for _ in 0..3 {
+        start_server(&env, "web");
+        let r = env.run(&["stop", "web"]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+    }
+    drop(churn);
+}
