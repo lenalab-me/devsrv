@@ -155,10 +155,9 @@ fn readiness(spec: &Spec, log: PathBuf) -> Condition {
             statuses: Statuses::any_answer(),
         },
         (Ready::Port, Some(port)) => Condition::Port { host: None, port },
-        (Ready::Log { pattern }, _) => Condition::Log {
-            path: log,
-            pattern: Regex::new(pattern).expect("checked by the parser"),
-        },
+        (Ready::Log { pattern }, _) => {
+            Condition::log(log, Regex::new(pattern).expect("checked by the parser"))
+        }
         _ => Condition::Delay(Instant::now() + Duration::from_millis(500)),
     }
 }

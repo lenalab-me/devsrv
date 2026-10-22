@@ -1556,3 +1556,60 @@ fn who_does_not_call_a_port_free_that_answers() {
         r.stderr
     );
 }
+
+#[test]
+fn wait_file_reads_a_big_file_within_the_timeout() {
+    let env = Env::new();
+    let line = "compiling module foo bar baz 0123456789 abcdefghijklmnopqrstuvwxyz\n";
+    let big = line.repeat(20_000_000 / line.len());
+    std::fs::write(env.projects[0].path().join("big.log"), big).unwrap();
+    let t = Instant::now();
+    let r = env.run(&["wait", "-t", "300ms", "file", "big.log", "never-there"]);
+    assert_eq!(r.code, 1, "{}", r.stderr);
+    assert!(
+        t.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn wait_file_reads_what_is_written_and_a_line_written_in_two_parts_whole() {
+    use std::io::Write;
+    let env = Env::new();
+    let path = env.projects[0].path().join("out.log");
+    std::fs::write(&path, "starting\nlisten").unwrap();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(b"ing on 8080\nmore\n").unwrap();
+        })
+    };
+    let r = env.run(&[
+        "wait",
+        "-t",
+        "5",
+        "file",
+        "out.log",
+        "^listening on [0-9]+$",
+    ]);
+    writer.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert!(r.stdout.ends_with(": listening on 8080\n"), "{}", r.stdout);
+    // A file written again from its start is read from its start.
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::write(&path, "ready\n").unwrap();
+        })
+    };
+    let r = env.run(&["wait", "-t", "5", "file", "out.log", "^ready$"]);
+    writer.join().unwrap();
+    assert_eq!(r.code, 0, "{}", r.stderr);
+}

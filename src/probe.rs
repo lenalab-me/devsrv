@@ -1,5 +1,6 @@
 //! Conditions to wait for, the one loop that waits for them, and reading logs.
 
+use std::cell::RefCell;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
@@ -56,9 +57,11 @@ pub enum Condition {
         host: Option<String>,
         port: u16,
     },
+    /// A line of the file matches. Made with `Condition::log`.
     Log {
         path: PathBuf,
         pattern: Regex,
+        scan: RefCell<Scan>,
     },
     File(PathBuf),
     /// The command exits 0. The process group of each run is killed when the run ends,
@@ -71,6 +74,111 @@ pub enum Condition {
     },
     /// The moment has come (`--ready none`: still running after a short while).
     Delay(Instant),
+}
+
+impl Condition {
+    pub fn log(path: PathBuf, pattern: Regex) -> Condition {
+        Condition::Log {
+            path,
+            pattern,
+            scan: RefCell::default(),
+        }
+    }
+}
+
+/// How far the lines of a file have been read: none before `offset` matched, and
+/// `partial` is the start of a line not yet ended. Each check reads only what was
+/// written since the last one.
+#[derive(Default)]
+pub struct Scan {
+    /// The file read (device and inode): another one is read from its start.
+    file: Option<(u64, u64)>,
+    offset: u64,
+    partial: Vec<u8>,
+}
+
+/// What one read of the file takes at most; the check looks at the clock between reads.
+const CHUNK: usize = 1 << 20;
+
+/// A line, ANSI escapes and the `\r` of `\r\n` removed, if it matches.
+fn matching(line: &[u8], pattern: &Regex) -> Option<String> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let text = String::from_utf8_lossy(line);
+    let text = if text.contains('\x1b') {
+        strip_ansi(&text)
+    } else {
+        text.into_owned()
+    };
+    pattern.is_match(&text).then_some(text)
+}
+
+/// The first line written since the last call that matches. The last line counts even
+/// without a final newline. Reading stops at the deadline, and goes on from there next
+/// time; a file that was truncated or replaced is read again from its start.
+fn scan_lines(
+    path: &Path,
+    pattern: &Regex,
+    scan: &mut Scan,
+    deadline: Instant,
+) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("no such file".into()),
+        Err(e) => return Err(format!("cannot read it: {e}")),
+    };
+    let meta = f.metadata().map_err(|e| format!("cannot read it: {e}"))?;
+    let id = (meta.dev(), meta.ino());
+    if scan.file != Some(id) || meta.len() < scan.offset {
+        *scan = Scan {
+            file: Some(id),
+            ..Scan::default()
+        };
+    }
+    f.seek(SeekFrom::Start(scan.offset))
+        .map_err(|e| format!("cannot read it: {e}"))?;
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(format!("cannot read it: {e}")),
+        };
+        scan.offset += n as u64;
+        let mut rest = &buf[..n];
+        while let Some(i) = rest.iter().position(|&b| b == b'\n') {
+            let found = if scan.partial.is_empty() {
+                matching(&rest[..i], pattern)
+            } else {
+                scan.partial.extend_from_slice(&rest[..i]);
+                let found = matching(&scan.partial, pattern);
+                scan.partial.clear();
+                found
+            };
+            if let Some(line) = found {
+                return Ok(line);
+            }
+            rest = &rest[i + 1..];
+        }
+        scan.partial.extend_from_slice(rest);
+        // A line this long is looked at once, and its end read as a line of its own.
+        if scan.partial.len() > CHUNK {
+            if let Some(line) = matching(&scan.partial, pattern) {
+                return Ok(line);
+            }
+            scan.partial.clear();
+        }
+        if Instant::now() >= deadline {
+            return Err("no line matched in the part of the file read in time".into());
+        }
+    }
+    if !scan.partial.is_empty()
+        && let Some(line) = matching(&scan.partial, pattern)
+    {
+        return Ok(line);
+    }
+    Err("no line matched".into())
 }
 
 /// What a met condition saw.
@@ -277,11 +385,11 @@ fn check(cond: &Condition, deadline: Instant) -> Result<Met, String> {
                 host: Some(h),
             })
         }
-        Condition::Log { path, pattern } => match find_line(path, pattern) {
-            Some(line) => Ok(Met::new(line)),
-            None if !path.exists() => Err("no such file".into()),
-            None => Err("no line matched".into()),
-        },
+        Condition::Log {
+            path,
+            pattern,
+            scan,
+        } => scan_lines(path, pattern, &mut scan.borrow_mut(), deadline).map(Met::new),
         Condition::Cmd(argv) => run_once(argv, deadline),
         Condition::File(p) => {
             if p.is_file() {
@@ -417,16 +525,6 @@ pub fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-/// The first line of the log that matches, ANSI escapes removed. The last line counts
-/// even without a final newline.
-pub fn find_line(path: &Path, pattern: &Regex) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    String::from_utf8_lossy(&bytes)
-        .lines()
-        .map(strip_ansi)
-        .find(|l| pattern.is_match(l))
 }
 
 /// The last `n` lines of a file, reading at most the last 1 MiB, and the total count

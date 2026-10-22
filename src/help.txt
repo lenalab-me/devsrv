@@ -73,9 +73,9 @@ wait: wait for a condition
   port N            a TCP connection is accepted (127.0.0.1, then ::1).
   file PATH         the file exists.
   file PATH REGEX   a line of the file matches (ANSI colors removed); the file may not
-                    exist yet. The whole file is read each time, so a line left by an
-                    earlier run counts too: write to a new file, or match what only this
-                    run prints. On a timeout, the end of the file is shown.
+                    exist yet. It is read from its start, then only what is added, so a
+                    line left by an earlier run counts too: write to a new file, or match
+                    what only this run prints. On a timeout, the end of the file is shown.
   log NAME REGEX    a line of NAME's log, from the start of its current run; fails at
                     once when NAME has exited.
   gone PID          the process has exited.

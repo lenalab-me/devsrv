@@ -624,11 +624,7 @@ pub fn logs(
             json!({ "name": name.as_str(), "log": path, "lines": tail, "total": total }),
         ));
     };
-    let cond = Condition::Log {
-        path: path.clone(),
-        pattern,
-    };
-    follow_log(&inst, cond, timeout, probe::EVERY)
+    follow_log(&inst, Condition::log(path, pattern), timeout, probe::EVERY)
 }
 
 /// Waits for a log line. Gives up early when the process is gone and the log is read.
@@ -1122,7 +1118,7 @@ pub fn wait(
         } => {
             let w = format!("`{}` in {}", pattern.as_str(), path.display());
             (
-                Condition::Log { path, pattern },
+                Condition::log(path, pattern),
                 w,
                 "check the pattern against the lines above, or raise --timeout".into(),
             )
@@ -1162,10 +1158,7 @@ pub fn wait(
             known(&inst)?;
             return follow_log(
                 &inst,
-                Condition::Log {
-                    path: inst.log_path(),
-                    pattern,
-                },
+                Condition::log(inst.log_path(), pattern),
                 timeout,
                 interval.unwrap_or(every),
             );
