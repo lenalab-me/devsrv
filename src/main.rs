@@ -34,7 +34,8 @@ fn main() {
             lines,
             follow,
             timeout,
-        }) => commands::logs(name, lines, follow, timeout),
+            new,
+        }) => commands::logs(name, lines, follow, timeout, new),
         Ok(Cmd::Stop { names, all }) => commands::stop(names, all),
         Ok(Cmd::Who { port }) => commands::who(port),
         Ok(Cmd::Wait {

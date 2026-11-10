@@ -101,6 +101,14 @@ impl UnixMs {
     }
 }
 
+/// Where a reader of a log stopped: the file (device and inode) and the offset of the
+/// first byte it has not read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cursor {
+    pub file: (u64, u64),
+    pub offset: u64,
+}
+
 /// When a process started, as the OS reports it. Only compared for equality.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

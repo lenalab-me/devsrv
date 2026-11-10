@@ -25,6 +25,8 @@ pub enum Cmd {
         lines: usize,
         follow: Option<Regex>,
         timeout: Duration,
+        /// `--new`: only what was added since the last `logs` of the name.
+        new: bool,
     },
     Stop {
         names: Vec<Name>,
@@ -73,6 +75,8 @@ pub enum WaitTarget {
     Log {
         name: Name,
         pattern: Regex,
+        /// `--new`: only lines that no `logs` or `wait log` of the name has read.
+        new: bool,
     },
     Gone(i32),
     /// The command exits 0.
@@ -485,7 +489,7 @@ fn start(a: &mut Args) -> Result<Cmd, Failure> {
 fn logs(a: &mut Args) -> Result<Cmd, Failure> {
     let sub = a.sub;
     let n = name(sub, a.next())?;
-    let (mut lines, mut follow, mut t) = (50usize, None, DEFAULT_TIMEOUT);
+    let (mut lines, mut follow, mut t, mut new) = (50usize, None, DEFAULT_TIMEOUT, false);
     while let Some(x) = a.next() {
         let (k, inline) = split_opt(&x);
         match k.as_str() {
@@ -499,6 +503,7 @@ fn logs(a: &mut Args) -> Result<Cmd, Failure> {
                 follow = Some(regex(sub, &a.value(&k, inline)?)?)
             }
             "--timeout" | "-t" => t = timeout(sub, &a.value(&k, inline)?)?,
+            "--new" | "--since-last" if inline.is_none() => new = true,
             _ => return Err(bad(sub, format!("unexpected `{x}`"))),
         }
     }
@@ -507,6 +512,7 @@ fn logs(a: &mut Args) -> Result<Cmd, Failure> {
         lines,
         follow,
         timeout: t,
+        new,
     })
 }
 
@@ -574,6 +580,8 @@ fn is_wait_option(arg: &str) -> bool {
         "-i",
         "--status",
         "-s",
+        "--new",
+        "--since-last",
         "--json",
         "-h",
         "--help",
@@ -585,6 +593,7 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
     let sub = a.sub;
     let (mut target, mut t, mut interval) = (None, DEFAULT_TIMEOUT, None);
     let mut codes: Option<Statuses> = None;
+    let mut only_new = false;
     // After `cmd`: the first argument that is not an option starts the command.
     let mut cmd = false;
     while let Some(x) = a.next_opt() {
@@ -687,9 +696,11 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
                     WaitTarget::Log {
                         name: n,
                         pattern: regex(sub, &p)?,
+                        new: false,
                     },
                 )?
             }
+            "new" | "since-last" if x.starts_with("--") && inline.is_none() => only_new = true,
             "url" => set(&mut target, url(&a.value(&k, inline)?)?)?,
             _ if x.starts_with("http://") || x.starts_with("https://") => {
                 set(&mut target, url(&x)?)?
@@ -702,6 +713,16 @@ fn wait(a: &mut Args) -> Result<Cmd, Failure> {
         return Err(bad(sub, "missing the command to run after `cmd --`"));
     }
     let mut target = target.ok_or_else(|| bad(sub, "nothing to wait for"))?;
+    if only_new {
+        match &mut target {
+            WaitTarget::Log { new, .. } => *new = true,
+            _ => {
+                return Err(
+                    bad(sub, "--new is for wait log").hint("devsrv wait log NAME REGEX --new")
+                );
+            }
+        }
+    }
     if let Some(c) = codes {
         match &mut target {
             WaitTarget::Url { statuses, .. } => *statuses = Some(c),

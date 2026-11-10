@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use regex_lite::Regex;
 
+use crate::model::Cursor;
 use crate::os::{ExitStatus, Foreground, Lookup, proc_info};
 
 /// The HTTP statuses that count as ready: ranges, both ends included.
@@ -78,11 +79,34 @@ pub enum Condition {
 
 impl Condition {
     pub fn log(path: PathBuf, pattern: Regex) -> Condition {
+        Condition::log_from(path, pattern, None)
+    }
+
+    /// A line after `from` matches; all of the file when that is another file by now, or
+    /// one that was truncated.
+    pub fn log_from(path: PathBuf, pattern: Regex, from: Option<Cursor>) -> Condition {
+        let scan = from.map_or_else(Scan::default, |c| Scan {
+            file: Some(c.file),
+            offset: c.offset,
+            partial: Vec::new(),
+        });
         Condition::Log {
             path,
             pattern,
-            scan: RefCell::default(),
+            scan: RefCell::new(scan),
         }
+    }
+
+    /// For a log condition that was met: just after the line that matched.
+    pub fn cursor(&self) -> Option<Cursor> {
+        let Condition::Log { scan, .. } = self else {
+            return None;
+        };
+        let scan = scan.borrow();
+        scan.file.map(|file| Cursor {
+            file,
+            offset: scan.offset,
+        })
     }
 }
 
@@ -145,6 +169,7 @@ fn scan_lines(
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(format!("cannot read it: {e}")),
         };
+        let chunk_at = scan.offset;
         scan.offset += n as u64;
         let mut rest = &buf[..n];
         while let Some(i) = rest.iter().position(|&b| b == b'\n') {
@@ -157,6 +182,8 @@ fn scan_lines(
                 found
             };
             if let Some(line) = found {
+                // Just after the line: a reader that goes on from here misses nothing.
+                scan.offset = chunk_at + (n - rest.len() + i + 1) as u64;
                 return Ok(line);
             }
             rest = &rest[i + 1..];
@@ -568,6 +595,86 @@ fn tail_of(f: &mut fs::File, n: usize) -> (Vec<String>, usize) {
     )
 }
 
+/// What was added to a log since a reader stopped.
+pub struct Added {
+    /// The last `n` of the lines.
+    pub lines: Vec<String>,
+    /// How many lines there were, in the last 1 MiB at most.
+    pub total: usize,
+    /// Where the next reader goes on; `None` when the file cannot be read.
+    pub next: Option<Cursor>,
+}
+
+/// The lines written after `from`: all of the file without it, and when it is of another
+/// file or of one that was truncated. A last line without its newline is left for the
+/// next reader, who gets it whole, unless `ended` says that nothing writes any more.
+/// With `upto`, only what comes before it is read.
+pub fn added(
+    path: &Path,
+    from: Option<Cursor>,
+    upto: Option<Cursor>,
+    n: usize,
+    ended: bool,
+) -> Added {
+    use std::os::unix::fs::MetadataExt;
+    let nothing = |next| Added {
+        lines: vec![],
+        total: 0,
+        next,
+    };
+    let Ok(mut f) = fs::File::open(path) else {
+        return nothing(None);
+    };
+    let Ok(meta) = f.metadata() else {
+        return nothing(None);
+    };
+    let id = (meta.dev(), meta.ino());
+    let upto = upto
+        .filter(|u| u.file == id && u.offset <= meta.len())
+        .map(|u| u.offset);
+    let len = upto.unwrap_or(meta.len());
+    let start = from
+        .filter(|c| c.file == id && c.offset <= len)
+        .map_or(0, |c| c.offset);
+    let read_from = start.max(len.saturating_sub(1 << 20));
+    // Without `upto`, what is written while this reads is read too.
+    let most = upto.map_or(u64::MAX, |end| end - read_from);
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(read_from)).is_err() || f.take(most).read_to_end(&mut buf).is_err() {
+        return nothing(from);
+    }
+    // Reading began inside a line: that line is not shown.
+    let skip = if read_from > start {
+        buf.iter()
+            .position(|&b| b == b'\n')
+            .map_or(buf.len(), |i| i + 1)
+    } else {
+        0
+    };
+    let end = if ended || buf.ends_with(b"\n") {
+        buf.len()
+    } else {
+        buf.iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(skip, |i| i + 1)
+    }
+    .max(skip);
+    let text = String::from_utf8_lossy(&buf[skip..end]);
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    Added {
+        lines: lines[total.saturating_sub(n)..]
+            .iter()
+            .map(|l| l.to_string())
+            .collect(),
+        total,
+        next: Some(Cursor {
+            file: id,
+            offset: read_from + end as u64,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +684,51 @@ mod tests {
         assert_eq!(
             strip_ansi("\x1b[32m  ➜  Local:\x1b[0m http://x"),
             "  ➜  Local: http://x"
+        );
+    }
+
+    #[test]
+    fn a_log_read_on_from_a_match_finds_the_next_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        fs::write(&path, "up\nhit 1\nhit 2\n").unwrap();
+        let pattern = Regex::new("hit").unwrap();
+        let soon = || Instant::now() + Duration::from_secs(5);
+        let first = Condition::log(path.clone(), pattern.clone());
+        assert_eq!(check(&first, soon()).map(|m| m.what), Ok("hit 1".into()));
+        let second = Condition::log_from(path.clone(), pattern.clone(), first.cursor());
+        assert_eq!(check(&second, soon()).map(|m| m.what), Ok("hit 2".into()));
+        let third = Condition::log_from(path, pattern, second.cursor());
+        assert!(check(&third, soon()).is_err());
+    }
+
+    #[test]
+    fn added_leaves_an_unfinished_line_for_the_next_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log");
+        fs::write(&path, "one\ntwo\nthr").unwrap();
+        let a = added(&path, None, None, 50, false);
+        assert_eq!(
+            (a.lines.clone(), a.total),
+            (vec!["one".to_string(), "two".into()], 2)
+        );
+        fs::write(&path, "one\ntwo\nthree\nfour\n").unwrap();
+        let b = added(&path, a.next, None, 1, false);
+        assert_eq!((b.lines, b.total), (vec!["four".to_string()], 2));
+        // Nothing writes any more: the unfinished line is shown, once.
+        fs::write(&path, "one\ntwo\nthree\nfour\nfi").unwrap();
+        let c = added(&path, b.next, None, 50, true);
+        // Up to a place: what comes after it is left.
+        let upto = added(&path, a.next, b.next, 50, true);
+        assert_eq!(upto.lines, vec!["three".to_string(), "four".into()]);
+        assert_eq!(upto.next, b.next);
+        assert_eq!(c.lines, vec!["fi".to_string()]);
+        assert_eq!(added(&path, c.next, None, 50, true).total, 0);
+        // A shorter file is another log: all of it is new.
+        fs::write(&path, "again\n").unwrap();
+        assert_eq!(
+            added(&path, c.next, None, 50, false).lines,
+            vec!["again".to_string()]
         );
     }
 

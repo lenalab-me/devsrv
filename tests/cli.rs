@@ -509,6 +509,124 @@ fn c11_the_summary_of_the_help_says_how_to_use_it_in_40_lines() {
     }
 }
 
+#[test]
+fn logs_new_shows_and_waits_for_only_what_was_added_since_the_last_look() {
+    let env = Env::new();
+    let go = env.projects[0].path().join("go");
+    let script = "echo up; echo hit; while :; do [ -e go ] && { rm go; echo got it; echo hit; echo after; }; sleep 0.05; done";
+    let start = |env: &Env, script: &str| {
+        let r = env.run(&["start", "t", "--ready", "log:hit", "--", "sh", "-c", script]);
+        assert_eq!(r.code, 0, "{}", r.stderr);
+    };
+    start(&env, script);
+    assert_eq!(env.run(&["logs", "t"]).stdout, "up\nhit\n");
+    let r = env.run(&["logs", "t", "--new"]);
+    assert_eq!((r.code, r.stdout.as_str()), (0, ""), "{}", r.stderr);
+    assert!(r.stderr.contains("nothing new in t's log"), "{}", r.stderr);
+    assert_eq!(env.json(&["logs", "t", "--new"])["total"], 0);
+
+    // The line read before does not count, and the failure shows what did come.
+    let wait_new = |timeout: &str| {
+        env.run(&[
+            "logs",
+            "t",
+            "--new",
+            "--follow-until",
+            "hit",
+            "--timeout",
+            timeout,
+        ])
+    };
+    let r = wait_new("0.5");
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    assert!(
+        r.stderr
+            .contains("no new line of t's log matched within 0.5s"),
+        "{}",
+        r.stderr
+    );
+    assert!(r.stderr.contains("log: nothing was added"), "{}", r.stderr);
+    // Without --new it still counts, and devsrv says that it is an old one. The place
+    // does not go back to it.
+    let r = env.run(&["logs", "t", "--follow-until", "up", "--timeout", "2"]);
+    assert_eq!((r.code, r.stdout.as_str()), (0, "up\n"));
+    assert!(r.stderr.contains("read before; add --new"), "{}", r.stderr);
+    assert_eq!(wait_new("0.5").code, 1);
+
+    // The next one does, once: with the new lines before it, or -n 1 for the line alone.
+    std::fs::write(&go, "").unwrap();
+    let r = wait_new("10");
+    assert_eq!(
+        (r.code, r.stdout.as_str()),
+        (0, "got it\nhit\n"),
+        "{}",
+        r.stderr
+    );
+    assert!(!r.stderr.contains("read before"), "{}", r.stderr);
+    assert_eq!(wait_new("0.5").code, 1);
+    std::fs::write(&go, "").unwrap();
+    let r = env.run(&["logs", "t", "--new", "-n", "1", "--follow-until", "hit"]);
+    assert_eq!((r.code, r.stdout.as_str()), (0, "hit\n"), "{}", r.stderr);
+
+    // wait log takes --new too, and prints the line.
+    let wait_log =
+        |timeout: &str| env.run(&["wait", "log", "t", "hit", "--new", "--timeout", timeout]);
+    let r = wait_log("0.5");
+    assert_eq!(r.code, 1, "{}", r.stdout);
+    std::fs::write(&go, "").unwrap();
+    let r = wait_log("10");
+    assert_eq!((r.code, r.stdout.as_str()), (0, "hit\n"), "{}", r.stderr);
+    let r = env.run(&["wait", "port", "1", "--new"]);
+    assert_eq!(r.code, 2);
+    assert!(r.stderr.contains("--new is for wait log"), "{}", r.stderr);
+
+    // A wait that fails leaves the lines new, and shows them.
+    std::fs::write(&go, "").unwrap();
+    let r = env.run(&["wait", "log", "t", "got", "--new", "--timeout", "10"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&[
+        "logs",
+        "t",
+        "--new",
+        "--follow-until",
+        "never",
+        "--timeout",
+        "1",
+    ]);
+    assert_eq!(r.code, 1);
+    assert!(r.stderr.contains("| hit"), "{}", r.stderr);
+    assert!(!r.stderr.contains("| got it"), "{}", r.stderr);
+
+    // What is added is printed once.
+    assert_eq!(env.run(&["logs", "t", "--new"]).stdout, "hit\nafter\n");
+    assert_eq!(env.run(&["logs", "t", "--new"]).stdout, "");
+
+    // Another run has another log: all of it is new, also when it is the longer one.
+    assert_eq!(env.run(&["stop", "t"]).code, 0);
+    start(
+        &env,
+        "echo a long first line of the second run; echo hit; sleep 300",
+    );
+    let r = env.run(&["logs", "t", "--new", "-n", "1"]);
+    assert_eq!(r.stdout, "hit\n");
+    assert!(
+        r.stderr.contains("the last 1 of 2 new lines"),
+        "{}",
+        r.stderr
+    );
+    assert_eq!(env.run(&["stop", "t"]).code, 0);
+    start(
+        &env,
+        "echo the first line of the third run, longer than all of the second run; echo hit; sleep 300",
+    );
+    assert_eq!(
+        env.run(&["logs", "t", "--new"]).stdout,
+        "the first line of the third run, longer than all of the second run\nhit\n"
+    );
+    let r = env.run(&["logs", "t", "--new=1"]);
+    assert_eq!(r.code, 2, "{}", r.stderr);
+}
+
 const HELP_TXT: &str = include_str!("../src/help.txt");
 
 /// The headings of help.txt: lines not indented, after the summary.

@@ -4,11 +4,11 @@ Usage:
   devsrv start NAME [--port auto|N] [--ready http[:PATH]|port|log:REGEX|none]
                [--timeout 30s] -- CMD ARGS...
   devsrv ls [--all]                  what devsrv started here: name, state, pid, port, age
-  devsrv logs NAME [-n 50] [--follow-until REGEX [--timeout 30s]]
+  devsrv logs NAME [-n 50] [--new] [--follow-until REGEX [--timeout 30s]]
   devsrv stop NAME... | --all        stops only what devsrv started (--all: in this project)
   devsrv who PORT                    who listens on PORT (never stops it)
   devsrv wait [--timeout 30s] [--interval 0.5s] URL [--status 200] | port N
-              | file PATH [REGEX] | log NAME REGEX | gone PID | cmd -- CMD ARGS...
+              | file PATH [REGEX] | log NAME REGEX [--new] | gone PID | cmd -- CMD ARGS...
 
 Examples:
   devsrv start web --port auto -- python3 -m http.server {port}
@@ -16,6 +16,7 @@ Examples:
   devsrv start api --port 8080 --ready http:/health -- cargo run
   devsrv start worker --ready 'log:listening' -- node worker.js
   devsrv logs web -n 20;  devsrv stop web;  devsrv wait http://127.0.0.1:8080/
+  devsrv logs api --new --follow-until 'POST /x'    (the next such line, not an old one)
   devsrv wait http://127.0.0.1:8080/app.js --status 200      (until it is not 404)
   devsrv wait file build.log 'compiled|error';  devsrv wait cmd -- pg_isready -q
 
@@ -60,6 +61,18 @@ ls: what devsrv started
 logs: the log of one name
   logs NAME prints the last -n lines (50). --follow-until REGEX waits for a line that
   matches, reading from the start of the current run's log, up to --timeout.
+  --new is for a server that stays up while you act on it: only the lines that no
+  `logs NAME` or `wait log NAME` has read yet count, so a line from before is not
+  taken for the answer to what you just did.
+    logs NAME --new                       the lines added since (the last -n), then
+                                          they are read; nothing new: no output, exit 0
+    logs NAME --new --follow-until REGEX  waits for the next line that matches, and
+                                          prints the new lines up to it (-n 1: that
+                                          line alone); what comes after it stays new
+  Act, then ask: no sleep is needed, a line written before you ask is still new.
+  When no new line matches in time, the new lines that did come are shown, and they
+  stay new. A start begins a new log, all of it new. One place is kept per name: two
+  readers of one name take lines from each other.
 
 who: who listens on a port
   who PORT names the process that listens, and the devsrv name if devsrv started it.
@@ -81,7 +94,8 @@ wait: wait for a condition
                     What follows PATH is REGEX unless it is an option of wait: 200 or -->
                     is a pattern.
   log NAME REGEX    a line of NAME's log, from the start of its current run; fails at
-                    once when NAME has exited.
+                    once when NAME has exited. With --new, only a line that no logs or
+                    wait log of NAME has read yet: the next one (devsrv help logs).
   gone PID          the process has exited. One of another user (root's) counts as there
                     until it exits, though devsrv cannot read it.
   cmd -- CMD ARGS   CMD exits 0. Each run has no stdin and its own process group, which

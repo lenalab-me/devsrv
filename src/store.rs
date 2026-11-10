@@ -8,6 +8,7 @@
 //! <root>/<project>-<hash>/<name>/log
 //! <root>/<project>-<hash>/<name>/stop   a stop request: the token of the run it is for
 //! <root>/<project>-<hash>/<name>/supervisor.err
+//! <root>/<project>-<hash>/<name>/seen   where the last `logs` of the name stopped reading
 //! ```
 
 use std::fs::{self, File, OpenOptions};
@@ -17,7 +18,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::model::{Name, RECORD_VERSION, Record, Scope, State};
+use crate::model::{Cursor, Name, RECORD_VERSION, Record, Scope, State};
 use crate::report::Failure;
 
 pub struct Store {
@@ -179,6 +180,32 @@ impl Instance {
     }
     fn record_path(&self) -> PathBuf {
         self.dir.join("record.json")
+    }
+    fn seen_path(&self) -> PathBuf {
+        self.dir.join("seen")
+    }
+    /// Where the last `logs` of this name stopped reading, if it is known.
+    pub fn seen(&self) -> Option<Cursor> {
+        let text = fs::read_to_string(self.seen_path()).ok()?;
+        let mut n = text.split_whitespace().map(|x| x.parse::<u64>().ok());
+        let (dev, ino, offset) = (n.next()??, n.next()??, n.next()??);
+        Some(Cursor {
+            file: (dev, ino),
+            offset,
+        })
+    }
+    /// Remembers it for `logs --new`. When it cannot be written, the next `--new` shows
+    /// more than what is new, never less.
+    pub fn set_seen(&self, c: Cursor) {
+        let tmp = self.dir.join("seen.tmp");
+        let text = format!("{} {} {}\n", c.file.0, c.file.1, c.offset);
+        if fs::write(&tmp, text).is_err() || fs::rename(&tmp, self.seen_path()).is_err() {
+            let _ = fs::remove_file(self.seen_path());
+        }
+    }
+    /// A new run has a new log: all of it is new.
+    pub fn forget_seen(&self) {
+        let _ = fs::remove_file(self.seen_path());
     }
     fn lock_path(&self) -> PathBuf {
         self.dir.join("lock")

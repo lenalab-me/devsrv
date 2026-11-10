@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::cli::{PortArg, StartArgs, WaitTarget};
-use crate::model::{Cause, End, Name, ProcRef, Ready, Record, Scope, Spec, State, UnixMs, human};
+use crate::model::{
+    Cause, Cursor, End, Name, ProcRef, Ready, Record, Scope, Spec, State, UnixMs, human,
+};
 use crate::os::{self, ExitStatus, Lookup, OwnedGroup};
 use crate::probe::{self, Condition, Outcome};
 use crate::report::{Failure, NOT_MET, Output, SYSTEM, USAGE};
@@ -323,6 +325,7 @@ pub fn start(args: StartArgs) -> Result<Output, Failure> {
         .map_err(|e| fail_io("clear the old record", e))?;
     let _ = fs::remove_file(inst.stop_path());
     File::create(inst.log_path()).map_err(|e| fail_io("create the log", e))?;
+    inst.forget_seen();
     let mut sup =
         supervisor::launch(&claim, &spec).map_err(|e| fail_io("start the supervisor", e))?;
     drop(claim);
@@ -649,33 +652,99 @@ pub fn logs(
     lines: usize,
     follow: Option<regex_lite::Regex>,
     timeout: Duration,
+    new: bool,
 ) -> Result<Output, Failure> {
     let (_, project) = here()?;
     let inst = project.instance(&name);
-    known(&inst)?;
+    let (record, status) = known(&inst)?;
+    if let Some(pattern) = follow {
+        return follow_log(&inst, pattern, new, lines, timeout, probe::EVERY);
+    }
     let path = inst.log_path();
-    let Some(pattern) = follow else {
-        let (tail, total) = probe::tail(&path, lines);
-        let mut text = tail.join("\n");
+    let ended = !alive(&record, status);
+    let joined = |lines: &[String]| {
+        let mut text = lines.join("\n");
         if !text.is_empty() {
             text.push('\n');
         }
+        text
+    };
+    if !new {
+        // The end is noted first: what is written while the tail is read is new next time.
+        let end = probe::added(&path, None, None, 0, ended).next;
+        let (tail, total) = probe::tail(&path, lines);
+        read_up_to(&inst, end);
         return Ok(Output::new(
-            text,
+            joined(&tail),
             json!({ "name": name.as_str(), "log": path, "lines": tail, "total": total }),
         ));
+    }
+    let added = probe::added(&path, inst.seen(), None, lines, ended);
+    read_up_to(&inst, added.next);
+    let note = match (added.total, added.lines.len()) {
+        (0, _) => format!("devsrv: nothing new in {name}'s log\n"),
+        (total, shown) if shown < total => {
+            format!("devsrv: the last {shown} of {total} new lines (-n {total} for all)\n")
+        }
+        _ => String::new(),
     };
-    follow_log(&inst, Condition::log(path, pattern), timeout, probe::EVERY)
+    let out = Output::new(
+        joined(&added.lines),
+        json!({ "name": name.as_str(), "log": path, "lines": added.lines, "total": added.total, "new": true }),
+    );
+    Ok(if note.is_empty() { out } else { out.note(note) })
+}
+
+/// Notes how far the name's log has been read, for `--new`. It never goes back: a line
+/// that was read once is not new again.
+fn read_up_to(inst: &Instance, at: Option<Cursor>) {
+    let Some(at) = at else { return };
+    match inst.seen() {
+        Some(seen) if seen.file == at.file && seen.offset >= at.offset => {}
+        _ => inst.set_seen(at),
+    }
+}
+
+/// For a wait on new lines that failed: the lines that did come, which is where a
+/// pattern that is a little off shows.
+fn with_new_lines(mut f: Failure, inst: &Instance, from: Option<Cursor>) -> Failure {
+    let path = inst.log_path();
+    let added = probe::added(&path, from, None, LOG_TAIL, true);
+    if added.total == 0 {
+        f = f.detail(format!("log: nothing was added: {}", path.display()));
+    } else {
+        f = f.detail(format!(
+            "log (last {} of {} new lines): {}",
+            added.lines.len(),
+            added.total,
+            path.display()
+        ));
+        for l in &added.lines {
+            f = f.detail(format!("| {l}"));
+        }
+    }
+    let data = json!({ "log": path, "log_tail": added.lines });
+    let prev = std::mem::take(&mut f.data);
+    f.data(merge(prev, data))
+        .hint("without --new, the lines read before count too")
 }
 
 /// Waits for a log line. Gives up early when the process is gone and the log is read.
+/// With `new`, only lines that no `logs` or `wait log` of the name has read count, and
+/// the last `lines` of them up to the match are the output.
 fn follow_log(
     inst: &Instance,
-    cond: Condition,
+    pattern: regex_lite::Regex,
+    new: bool,
+    lines: usize,
     timeout: Duration,
     every: Duration,
 ) -> Result<Output, Failure> {
     let name = &inst.name;
+    let path = inst.log_path();
+    let seen = inst.seen();
+    let from = if new { seen } else { None };
+    let cond = Condition::log_from(path.clone(), pattern, from);
     let ended = || match inst.status() {
         Ok(Some((record, status))) if !alive(&record, status) => Some(()),
         Ok(None) => Some(()),
@@ -690,17 +759,67 @@ fn follow_log(
         gone_once = ended().is_some();
         None
     });
+    let fresh = if new { "new " } else { "" };
     match outcome {
-        Outcome::Met(met, waited) => Ok(Output::new(format!("{}\n", met.what), json!({ "name": name.as_str(), "line": met.what, "waited_ms": waited.as_millis() as u64 }))
-            .note(format!("devsrv: matched after {}\n", human(waited)))),
-        Outcome::TimedOut(_) => Err(with_log_tail(
-            Failure::new(NOT_MET, "timed_out", format!("no line of {name}'s log matched within {}", human(timeout))).hint("check the pattern against the log above, or raise --timeout"),
-            inst,
-        )),
-        Outcome::Aborted(()) => Err(with_log_tail(
-            Failure::new(NOT_MET, "exited", format!("{name} is not running and no line of its log matched")).hint(format!("devsrv ls shows how {name} ended")),
-            inst,
-        )),
+        Outcome::Met(met, waited) => {
+            let at = cond.cursor();
+            let mut shown = vec![met.what.clone()];
+            if new && lines > 1 {
+                let before = probe::added(&path, from, at, lines, true);
+                if !before.lines.is_empty() {
+                    shown = before.lines;
+                }
+            }
+            let mut note = format!("devsrv: matched after {}\n", human(waited));
+            // Without --new the whole log counts, so a line read long ago ends the wait.
+            let old = seen
+                .zip(at)
+                .is_some_and(|(s, a)| s.file == a.file && a.offset <= s.offset);
+            if !new && old {
+                note.push_str(
+                    "devsrv: that line was read before; add --new to wait for the next one\n",
+                );
+            }
+            read_up_to(inst, at);
+            let mut text = shown.join("\n");
+            text.push('\n');
+            let mut data = json!({ "name": name.as_str(), "line": met.what, "waited_ms": waited.as_millis() as u64 });
+            if new {
+                data["lines"] = json!(shown);
+            }
+            Ok(Output::new(text, data).note(note))
+        }
+        Outcome::TimedOut(_) => {
+            let f = Failure::new(
+                NOT_MET,
+                "timed_out",
+                format!(
+                    "no {fresh}line of {name}'s log matched within {}",
+                    human(timeout)
+                ),
+            );
+            Err(if new {
+                with_new_lines(f, inst, from).hint("or raise --timeout")
+            } else {
+                with_log_tail(
+                    f.hint("check the pattern against the log above, or raise --timeout"),
+                    inst,
+                )
+            })
+        }
+        Outcome::Aborted(()) => {
+            let f = Failure::new(
+                NOT_MET,
+                "exited",
+                format!("{name} is not running and no {fresh}line of its log matched"),
+            )
+            .hint(format!("devsrv ls shows how {name} ended"));
+            Err(if new {
+                with_new_lines(f, inst, from)
+            } else {
+                with_log_tail(f, inst)
+            })
+        }
     }
 }
 
@@ -1194,16 +1313,11 @@ pub fn wait(
                 "it is still running".into(),
             )
         }
-        WaitTarget::Log { name, pattern } => {
+        WaitTarget::Log { name, pattern, new } => {
             let (_, project) = here()?;
             let inst = project.instance(&name);
             known(&inst)?;
-            return follow_log(
-                &inst,
-                Condition::log(inst.log_path(), pattern),
-                timeout,
-                interval.unwrap_or(every),
-            );
+            return follow_log(&inst, pattern, new, 1, timeout, interval.unwrap_or(every));
         }
     };
     match probe::wait_every(&cond, timeout, interval.unwrap_or(every), || None::<()>) {
