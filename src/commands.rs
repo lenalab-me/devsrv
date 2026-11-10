@@ -671,13 +671,25 @@ pub fn logs(
     };
     if !new {
         // The end is noted first: what is written while the tail is read is new next time.
-        let end = probe::added(&path, None, None, 0, ended).next;
+        let seen = inst.seen();
+        let since = probe::added(&path, seen, None, 0, ended);
         let (tail, total) = probe::tail(&path, lines);
-        read_up_to(&inst, end);
-        return Ok(Output::new(
+        read_up_to(&inst, since.next);
+        let out = Output::new(
             joined(&tail),
             json!({ "name": name.as_str(), "log": path, "lines": tail, "total": total }),
-        ));
+        );
+        // A second look at a run is where --new helps: say so there, not in a manual.
+        return Ok(match (seen, since.total) {
+            (None, _) => out,
+            (Some(_), 0) => out.note(format!(
+                "devsrv: nothing new since the last look; `devsrv logs {name} --new --follow-until REGEX` waits for the next line\n"
+            )),
+            (Some(_), n) => out.note(format!(
+                "devsrv: {n} new line{} since the last look; --new prints only those, --new --follow-until REGEX waits for the next\n",
+                if n == 1 { "" } else { "s" }
+            )),
+        });
     }
     let added = probe::added(&path, inst.seen(), None, lines, ended);
     read_up_to(&inst, added.next);

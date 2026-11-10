@@ -625,6 +625,38 @@ fn logs_new_shows_and_waits_for_only_what_was_added_since_the_last_look() {
     );
     let r = env.run(&["logs", "t", "--new=1"]);
     assert_eq!(r.code, 2, "{}", r.stderr);
+
+    // A second plain look at a run says how many lines are new, and how to ask for
+    // those alone; the first look of a run says nothing.
+    assert_eq!(env.run(&["stop", "t"]).code, 0);
+    start(&env, script);
+    let r = env.run(&["logs", "t"]);
+    assert_eq!((r.stdout.as_str(), r.stderr.as_str()), ("up\nhit\n", ""));
+    let r = env.run(&["logs", "t"]);
+    assert_eq!(r.stdout, "up\nhit\n");
+    assert!(
+        r.stderr.contains(
+            "nothing new since the last look; `devsrv logs t --new --follow-until REGEX`"
+        ),
+        "{}",
+        r.stderr
+    );
+    // wait file reads the log without being a look at it.
+    let log = env.json(&["logs", "t"])["log"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::write(&go, "").unwrap();
+    let r = env.run(&["wait", "file", &log, "after", "--timeout", "10"]);
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    let r = env.run(&["logs", "t", "-n", "1"]);
+    assert_eq!(r.stdout, "after\n");
+    assert!(
+        r.stderr
+            .contains("3 new lines since the last look; --new prints only those"),
+        "{}",
+        r.stderr
+    );
 }
 
 const HELP_TXT: &str = include_str!("../src/help.txt");

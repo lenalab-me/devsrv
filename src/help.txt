@@ -72,7 +72,8 @@ logs: the log of one name
   Act, then ask: no sleep is needed, a line written before you ask is still new.
   When no new line matches in time, the new lines that did come are shown, and they
   stay new. A start begins a new log, all of it new. One place is kept per name: two
-  readers of one name take lines from each other.
+  readers of one name take lines from each other. A second plain `logs NAME` of a run
+  says on stderr how many of the lines are new.
 
 who: who listens on a port
   who PORT names the process that listens, and the devsrv name if devsrv started it.
